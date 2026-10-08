@@ -46,6 +46,11 @@ def test_import_html_then_stats_list_and_export(tmp_path, capsys):
     assert main(["--data-dir", str(data), "stats", "Hot Wheels R34 Nissan Skyline GT-R ZAMAC"]) == 0
     assert "median" in capsys.readouterr().out
 
+    assert main(["--data-dir", str(data), "stats", "ta1 adapter", "--by", "month"]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines[0].split()[:3] == ["period", "cur", "sold"] and len(lines) >= 3
+    assert all(line.split()[0] < later.split()[0] for line, later in zip(lines[1:], lines[2:]))  # oldest first
+
     assert main(["--data-dir", str(data), "list", "ta1 adapter", "--limit", "3"]) == 0
     assert len(capsys.readouterr().out.strip().splitlines()) == 3
 

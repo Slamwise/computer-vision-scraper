@@ -83,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_listing_filters(s)
     s.add_argument("--include-shipping", action="store_true", help="price + shipping")
     s.add_argument("--no-trim", action="store_true", help="keep outliers (default trims beyond 1.5x IQR)")
+    s.add_argument("--by", choices=["day", "week", "month"], help="one line per period, to see the trend")
     s.add_argument("--json", action="store_true", help="machine-readable output")
     s.set_defaults(func=cmd_stats)
 
@@ -278,6 +279,8 @@ def _filters(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_stats(args: argparse.Namespace) -> int:
     settings = _settings(args)
+    if args.by:
+        return _stats_by_period(args, settings)
     with _db(settings) as db:
         stats = db.price_stats(**_filters(args), include_shipping=args.include_shipping, trim_outliers=not args.no_trim)
     if args.json:
@@ -293,6 +296,23 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print(f"  median {_money(s.median)}   middle 50% {_money(s.p25)} - {_money(s.p75)}   "
               f"mean {_money(s.mean)}")
         print(f"  min {_money(s.min)}   max {_money(s.max)}   sold {s.first_sold} .. {s.last_sold}")
+    return 0
+
+
+def _stats_by_period(args: argparse.Namespace, settings: Settings) -> int:
+    with _db(settings) as db:
+        rows = db.price_series(period=args.by, include_shipping=args.include_shipping,
+                               trim_outliers=not args.no_trim, **_filters(args))
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+        return 0 if rows else 1
+    if not rows:
+        print("no dated sold listings match")
+        return 1
+    print(f"{'period':<10} {'cur':<4} {'sold':>5} {'median':>10} {'p25':>10} {'p75':>10} {'min':>10} {'max':>10}")
+    for r in rows:
+        print(f"{r['period']:<10} {r['currency']:<4} {r['count']:>5} {_money(r['median']):>10} "
+              f"{_money(r['p25']):>10} {_money(r['p75']):>10} {_money(r['min']):>10} {_money(r['max']):>10}")
     return 0
 
 

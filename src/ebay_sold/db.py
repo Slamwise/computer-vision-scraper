@@ -623,6 +623,8 @@ class Database:
                 time.sleep(0.02)
 
     def _migrate(self) -> None:
+        # Creating a new file is routine; only upgrading an existing one is worth telling the user.
+        report = log.info if self.schema_version > 0 else log.debug
         while self.schema_version < SCHEMA_VERSION:
             with self._tx() as c:
                 # Read again under the write lock: another process may have just migrated.
@@ -630,7 +632,7 @@ class Database:
                 if version >= SCHEMA_VERSION:
                     self._check_not_newer()  # a newer ebay-sold may have been the one
                     break
-                (log.debug if version == 0 else log.info)("migrating %s to schema version %d", self.path, version + 1)
+                report("migrating %s to schema version %d", self.path, version + 1)
                 for statement in _sql_statements(MIGRATIONS[version]):
                     c.execute(statement)
                 c.execute(f"PRAGMA user_version = {version + 1}")
