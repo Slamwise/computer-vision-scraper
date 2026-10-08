@@ -30,8 +30,10 @@ $ ebay-sold list "hot wheels r34 nissan skyline gt-r zamac" --limit 3
 eBay listed 39 under "Results matching fewer words", so stats count only the 31
 exact matches.)
 
-This is the second version of a 2021 project that read eBay screenshots with a
-custom YOLOv4-tiny model and Tesseract (kept in [`legacy/`](legacy/)). That
+This is the second version of a 2021 project,
+[computer-vision-scraper-yolov4](https://github.com/Slamwise/computer-vision-scraper-yolov4),
+that read eBay screenshots with a custom YOLOv4-tiny model and Tesseract. Its
+code is kept here in [`legacy/`](legacy/). That
 version stopped working for three reasons: the trained weights were lost, eBay
 kept asking it for CAPTCHAs, and its screenshots were never consistent.
 [What changed](#what-changed-since-2021) explains how each one is fixed.
