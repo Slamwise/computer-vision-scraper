@@ -8,7 +8,7 @@ var str3 = str2.concat('r.png')
 const puppeteer = require('puppeteer')
 var request = require('request');
 var headers = {
-    'apikey': 'REMOVED-API-KEY'
+    'apikey': process.env.ZENSCRAPE_API_KEY  // key removed from source; it was committed earlier and should be revoked
 };        
     
 var options = { 

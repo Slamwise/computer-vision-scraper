@@ -1,7 +1,8 @@
+import os
 import requests
 
 headers = { 
-    "apikey": "REMOVED-API-KEY"
+    "apikey": os.environ["ZENSCRAPE_API_KEY"]  # key removed from source; it was committed earlier and should be revoked
 }
 
 params = (

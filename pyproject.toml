@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ebay-sold"
+version = "0.2.0"
+description = "Collect eBay sold-listing prices into SQLite: polite browser fetching, DOM parsing, and a self-training YOLO + OCR vision fallback."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.45",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+# YOLO detection + OCR. Install torch first from the CPU index if you have no GPU:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+vision = [
+    "ultralytics>=8.3",
+    "opencv-python-headless>=4.9",
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "rapidocr-onnxruntime>=1.2",
+    "pytesseract>=0.3.10",
+]
+llm = ["anthropic>=1.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+all = ["ebay-sold[vision,llm]"]
+
+[project.scripts]
+ebay-sold = "ebay_sold.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ebay_sold = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "browser: needs a Chromium build that Playwright can launch",
+    "network: needs outbound network (eBay static CSS/image CDNs, model downloads)",
+    "vision: needs the [vision] extra (ultralytics, opencv, OCR)",
+    "slow: takes more than ~30 seconds",
+]

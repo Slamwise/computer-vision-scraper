@@ -1,0 +1,40 @@
+{
+  "source": "Internet Archive Wayback Machine raw captures (id_), <script>/<noscript> stripped. Used only as parser/vision test fixtures.",
+  "fixtures": [
+    {
+      "file": "sold_2025-11-02_xbox-one-controller.html.gz",
+      "original_url": "https://www.ebay.com/sch/i.html?_from=R40&_nkw=+xbox+one+controller&_sacat=0&Compatible%2520Product=Console%252C%2520Games%2520%2526%2520Accessories&rt=nc&LH_Sold=1&LH_Complete=1&_dcat=117042",
+      "archived_url": "https://web.archive.org/web/20251102183044id_/https://www.ebay.com/sch/i.html?_from=R40&_nkw=+xbox+one+controller&_sacat=0&Compatible%2520Product=Console%252C%2520Games%2520%2526%2520Accessories&rt=nc&LH_Sold=1&LH_Complete=1&_dcat=117042",
+      "captured_utc": "2025-11-02T18:30:44Z",
+      "layout": "s-card"
+    },
+    {
+      "file": "sold_2026-02-22_switch-pro-controller.html.gz",
+      "original_url": "https://www.ebay.com/sch/i.html?_sacat=0&_from=R40&Compatible%2520Product=Console%252C%2520Games%2520%2526%2520Accessories&_nkw=switch+pro+controller+official&_dcat=117042&_ipg=120&rt=nc&LH_Sold=1",
+      "archived_url": "https://web.archive.org/web/20260222184250id_/https://www.ebay.com/sch/i.html?_sacat=0&_from=R40&Compatible%2520Product=Console%252C%2520Games%2520%2526%2520Accessories&_nkw=switch+pro+controller+official&_dcat=117042&_ipg=120&rt=nc&LH_Sold=1",
+      "captured_utc": "2026-02-22T18:42:50Z",
+      "layout": "s-card"
+    },
+    {
+      "file": "sold_2026-04-16_ta1-adapter.html.gz",
+      "original_url": "https://www.ebay.com/sch/i.html?_nkw=ta1+adapter&_sacat=0&_from=R40&_trksid=p2334524.m570.l1313&_odkw=winsor+%26+newton+blending+%26+glazing+medium&_osacat=0&LH_Sold=1",
+      "archived_url": "https://web.archive.org/web/20260416152329id_/https://www.ebay.com/sch/i.html?_nkw=ta1+adapter&_sacat=0&_from=R40&_trksid=p2334524.m570.l1313&_odkw=winsor+%26+newton+blending+%26+glazing+medium&_osacat=0&LH_Sold=1",
+      "captured_utc": "2026-04-16T15:23:29Z",
+      "layout": "s-card"
+    },
+    {
+      "file": "sold_2026-04-24_sears-roebuck-magazine.html.gz",
+      "original_url": "https://www.ebay.com/sch/i.html?_nkw=sears+roebuck+%26+co+company+magazine&_sacat=0&_from=R40&_trksid=m570.l1313&_odkw=sears+roebuck+%26+co+magazine+1930s&_osacat=0&LH_Sold=1",
+      "archived_url": "https://web.archive.org/web/20260424181014id_/https://www.ebay.com/sch/i.html?_nkw=sears+roebuck+%26+co+company+magazine&_sacat=0&_from=R40&_trksid=m570.l1313&_odkw=sears+roebuck+%26+co+magazine+1930s&_osacat=0&LH_Sold=1",
+      "captured_utc": "2026-04-24T18:10:14Z",
+      "layout": "s-card"
+    },
+    {
+      "file": "sold_2026-04-26_hot-wheels-r34-zamac.html.gz",
+      "original_url": "https://www.ebay.com/sch/i.html?_fsrp=1&rt=nc&_from=R40&_nkw=Hot+Wheels+R34+Nissan+Skyline+GT-R+ZAMAC&_sacat=0&LH_Sold=1&Series=Fast%20%26%20Furious&_dcat=180506",
+      "archived_url": "https://web.archive.org/web/20260426102448id_/https://www.ebay.com/sch/i.html?_fsrp=1&rt=nc&_from=R40&_nkw=Hot+Wheels+R34+Nissan+Skyline+GT-R+ZAMAC&_sacat=0&LH_Sold=1&Series=Fast%20%26%20Furious&_dcat=180506",
+      "captured_utc": "2026-04-26T10:24:48Z",
+      "layout": "s-card"
+    }
+  ]
+}

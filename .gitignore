@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+
+# Runtime data (database, browser profile, HTML cache, screenshots, datasets, training runs)
+data/
+runs/
+datasets/
+*.sqlite
+*.sqlite3
+*.db
+
+# Model weights (download or train locally; see docs/vision.md)
+*.pt
+*.onnx
+!src/ebay_sold/vision/weights/*.pt
+
+# Secrets
+.env
