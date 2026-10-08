@@ -106,13 +106,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("html", nargs="+", type=Path, help=".html or .html.gz result pages (data/html-cache works)")
     s.add_argument("--out", type=Path, required=True)
     s.add_argument("--val", nargs="*", type=Path, default=None, help="pages to hold out for validation")
-    s.add_argument("--widths", default="1280,1440", help="viewport widths to render, comma-separated")
+    s.add_argument("--widths", default="1024,1280,1440", help="viewport widths to render, comma-separated")
+    s.add_argument("--scales", default="1", help="device scale factors, e.g. 1,2 to also cover HiDPI screenshots")
     s.add_argument("--no-images", action="store_true", help="gray boxes instead of product photos (offline)")
     s.set_defaults(func=cmd_vision_build)
 
     s = vsub.add_parser("train", help="train the detector on a built dataset")
     s.add_argument("data_yaml", type=Path)
-    s.add_argument("--epochs", type=int, default=40)
+    s.add_argument("--epochs", type=int, default=30)
     s.add_argument("--imgsz", type=int, default=1024)
     s.add_argument("--batch", type=int, default=8)
     s.add_argument("--model", default="yolo11n.pt", help="starting weights")
@@ -319,10 +320,13 @@ def cmd_vision_build(args: argparse.Namespace) -> int:
     from .vision.dataset import build_dataset
 
     widths = tuple(int(w) for w in args.widths.split(",") if w.strip())
+    scales = tuple(float(x) for x in args.scales.split(",") if x.strip())
     summary = asyncio.run(build_dataset(
-        list(args.html), args.out, val_sources=args.val, viewport_widths=widths, load_images=not args.no_images,
+        list(args.html), args.out, val_sources=args.val, viewport_widths=widths, device_scale_factors=scales,
+        load_images=not args.no_images,
     ))
-    print(summary.model_dump_json(indent=2) if hasattr(summary, "model_dump_json") else summary)
+    print(summary.model_dump_json(indent=2))
+    print(f"next: ebay-sold vision train {summary.data_yaml} --install")
     return 0
 
 
@@ -332,8 +336,10 @@ def cmd_vision_train(args: argparse.Namespace) -> int:
     from .vision.detector import train
 
     settings = _settings(args)
+    # nbs = batch: one optimiser step per batch. Ultralytics' default (64) would
+    # accumulate 16 small CPU batches per step and leave a few dozen steps in total.
     best = train(args.data_yaml, model=args.model, epochs=args.epochs, imgsz=args.imgsz, batch=args.batch,
-                 device=args.device, project=settings.data_dir / "runs")
+                 nbs=args.batch, device=args.device, project=settings.data_dir / "runs")
     print(f"best weights: {best}")
     if args.install:
         settings.models_dir.mkdir(parents=True, exist_ok=True)
@@ -370,7 +376,7 @@ def cmd_vision_eval(args: argparse.Namespace) -> int:
     settings = _settings(args)
     weights = args.weights or settings.weights_path
     report = evaluate(weights, list(args.html), viewport_width=args.width, ocr_backend=settings.vision.ocr_backend)
-    print(report.model_dump_json(indent=2) if hasattr(report, "model_dump_json") else report)
+    print(report.summary())
     return 0
 
 

@@ -96,7 +96,12 @@ _REGIONS_JS = """
     }
     return x2 > x1 ? box({ left: x1, top: y1, width: x2 - x1, height: y2 - y1 }) : null;
   };
-  const text = (els) => els.filter(Boolean).map((e) => e.innerText).join(' ').replace(/\\s+/g, ' ').trim();
+  const text = (els) => els.filter(Boolean).map((e) => (e.nodeType === 3 ? e.textContent : e.innerText))
+    .join(' ').replace(/\\s+/g, ' ').trim();
+  // A title's own text, without the "NEW LISTING" tag or screen-reader spans nested in it (legacy layout).
+  const TITLE_JUNK = '.LIGHT_HIGHLIGHT, .clipped, .s-card__new-listing';
+  const titleParts = (el) => el ? [...el.childNodes].filter((n) => !(n.nodeType === 1 && n.matches(TITLE_JUNK))
+    && (n.nodeType === 1 || (n.nodeType === 3 && n.textContent.trim()))) : [];
   const shown = (el) => {
     const cs = getComputedStyle(el);
     const r = el.getBoundingClientRect();
@@ -124,19 +129,25 @@ _REGIONS_JS = """
       ? one(['.s-card__title > .su-styled-text', '.s-card__title'])
       : one(['.s-item__title > span[role=heading]', '.s-item__title > span', '.s-item__title']);
     if (title && /^shop on ebay$/i.test(title.innerText.trim())) continue;  // hidden template card
-    put('title', [title]);
+    put('title', titleParts(title));
 
     // A struck-through price is the asking price of an accepted Best Offer, not
     // what the item sold for; labelling it "price" would teach the wrong value.
-    const struck = (el) => el.closest('.strikethrough, .STRIKETHROUGH') !== null
-      || /line-through/.test(getComputedStyle(el).textDecorationLine);
+    const squash = (t) => t.replace(/\s+/g, '');
+    const struck = (el) => {
+      if (el.closest('.strikethrough, .STRIKETHROUGH') || /line-through/.test(getComputedStyle(el).textDecorationLine)) return true;
+      // Legacy layout nests it: <span class="s-item__price"><span class="STRIKETHROUGH">$9.99</span></span>
+      const inner = [...el.querySelectorAll('.strikethrough, .STRIKETHROUGH')].map((e) => e.innerText).join('');
+      return squash(inner) !== '' && squash(inner) === squash(el.innerText);
+    };
     const prices = (modern ? [...card.querySelectorAll('.s-card__price')] : [one(['.s-item__price'])])
       .filter((el) => el && !struck(el));
     put('price', prices);
 
     put('sold_date', [modern
       ? one(['.s-card__caption .su-styled-text', '.s-card__caption'])
-      : one(['.s-item__caption--signal', '.s-item__title--tagblock .POSITIVE', '.s-item__caption'])]);
+      : one(['.s-item__caption--signal', '.s-item__title--tag .POSITIVE', '.s-item__title--tagblock .POSITIVE',
+             '.s-item__caption-section .POSITIVE', '.s-item__caption'])]);
 
     let shipping = null;
     if (modern) {

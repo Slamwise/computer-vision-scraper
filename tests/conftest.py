@@ -19,6 +19,12 @@ def fixture_names() -> list[str]:
     return [f["file"].removesuffix(".html.gz") for f in manifest["fixtures"]]
 
 
+def legacy_fixture_names() -> list[str]:
+    """Real 2024 pages in eBay's older ``li.s-item`` layout."""
+    manifest = json.loads((EBAY_FIXTURES / "manifest.json").read_text())
+    return [f["file"].removesuffix(".html.gz") for f in manifest.get("legacy", [])]
+
+
 def load_fixture(name: str) -> str:
     path = EBAY_FIXTURES / f"{name}.html.gz"
     if path.exists():

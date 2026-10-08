@@ -147,3 +147,17 @@ def test_parse_location():
     assert parse_location("from Canada") == "Canada"
     assert parse_location("Provenance : Chine") == "Chine"
     assert parse_location("") is None
+
+
+def test_ocr_lost_decimal_point_is_restored_only_for_ocr_text():
+    assert parse_shipping("+$3718 shipping", "USD", ocr=True) == 37.18
+    assert parse_money("$175.110", "USD", ocr=True) is None  # misread "$175.10": unknown beats a 1000x error
+    assert parse_money("1.234,56 €", None, ocr=True).amount == 1234.56  # euro thousands marks are fine
+    assert parse_money("$12", "USD", ocr=True).amount == 12.0  # 2 digits: a whole-dollar OCR read stays as is
+    assert parse_shipping("+$3718 shipping", "USD") == 3718.0  # DOM text is taken literally
+
+
+def test_ocr_bracket_for_one_in_dates():
+    assert parse_sold_date("Sold Dec 1], 2023", TODAY) == date(2023, 12, 11)
+    assert parse_sold_date("Sold Dec |1, 2023", TODAY) == date(2023, 12, 11)
+    assert parse_sold_date("SoldJul4,2025", TODAY) == date(2025, 7, 4)  # "Jul" is left alone

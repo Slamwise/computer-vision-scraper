@@ -43,6 +43,10 @@ _RANGE_GAP_RE = re.compile(
 )
 
 
+# Currencies eBay writes as "1,234.56": a "." before exactly 3 digits is never a thousands mark.
+_DOT_DECIMAL = frozenset({"USD", "GBP", "CAD", "AUD"})
+
+
 @dataclass(frozen=True)
 class Money:
     amount: float
@@ -81,11 +85,15 @@ def _ocr_fix_money(text: str) -> str:
     return re.sub(r"(?<=\d)[Oo]|[Oo](?=\d)", "0", text)
 
 
-def parse_money(text: str | None, default_currency: str | None = None) -> Money | None:
+def parse_money(text: str | None, default_currency: str | None = None, *, ocr: bool = False) -> Money | None:
     """Parse "$1,234.56", "£9.99", "EUR 12,50", "$3.75 to $23.95"...
 
     Returns ``None`` when no amount is shown (e.g. "See price"). A bare "$"
     takes ``default_currency`` (the site's currency).
+
+    ``ocr=True`` is for text read from pixels. eBay always prints cents, so an
+    amount of 3+ digits without a decimal separator ("$3718") lost its point
+    to OCR and means 37.18.
     """
     text = _ocr_fix_money(clean_text(text))
     if not text:
@@ -93,15 +101,25 @@ def parse_money(text: str | None, default_currency: str | None = None) -> Money 
     matches = list(_AMOUNT_RE.finditer(text))
     if not matches:
         return None
-    low = _parse_amount(matches[0].group(1))
+    currency = _detect_currency(text) or default_currency
+
+    def amount(raw: str) -> float | None:
+        if ocr and currency in _DOT_DECIMAL and re.search(r"\.\d{3}$", raw):
+            return None  # "$175.110": a misread, and no reading of it is safe
+        value = _parse_amount(raw)
+        if ocr and value is not None and re.fullmatch(r"\d{3,}", raw):
+            value = round(value / 100, 2)
+        return value
+
+    low = amount(matches[0].group(1))
     if low is None:
         return None
     high = None
     if len(matches) > 1 and _RANGE_GAP_RE.match(text[matches[0].end(): matches[1].start()]):
-        second = _parse_amount(matches[1].group(1))
+        second = amount(matches[1].group(1))
         if second is not None and second > low:
             high = second
-    return Money(amount=low, amount_max=high, currency=_detect_currency(text) or default_currency)
+    return Money(amount=low, amount_max=high, currency=currency)
 
 
 _FREE_RE = re.compile(
@@ -115,8 +133,11 @@ _FREE_RE = re.compile(
 _MONEY_HINT_RE = re.compile(r"[$£€]|\b(?:USD|CAD|AUD|GBP|EUR)\b|\d[.,]\d{2}(?!\d)", re.IGNORECASE)
 
 
-def parse_shipping(text: str | None, default_currency: str | None = None) -> float | None:
-    """``0.0`` for free shipping, the amount for "+$9.45 delivery", else ``None``."""
+def parse_shipping(text: str | None, default_currency: str | None = None, *, ocr: bool = False) -> float | None:
+    """``0.0`` for free shipping, the amount for "+$9.45 delivery", else ``None``.
+
+    ``ocr`` as for ``parse_money``.
+    """
     text = clean_text(text)
     if not text:
         return None
@@ -124,7 +145,7 @@ def parse_shipping(text: str | None, default_currency: str | None = None) -> flo
         return 0.0
     if not _MONEY_HINT_RE.search(_ocr_fix_money(text)):
         return None
-    money = parse_money(text, default_currency)
+    money = parse_money(text, default_currency, ocr=ocr)
     return money.amount if money else None
 
 
@@ -182,6 +203,8 @@ def parse_sold_date(text: str | None, today: date | None = None, *, day_first: b
     if not text:
         return None
     today = today or date.today()
+    # OCR reads a thin "1" as "]" / "|" / "!" next to another digit: "Dec 1], 2023".
+    text = re.sub(r"(?<=\d)[\]|!]|[\]|!](?=\d)", "1", text)
     text = _SOLD_PREFIX_RE.sub("", text)
     if text.lower().startswith("sold"):  # OCR glued "Sold" to the month: "SoldApr25"
         text = text[4:]

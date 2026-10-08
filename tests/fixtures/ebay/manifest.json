@@ -36,5 +36,21 @@
       "captured_utc": "2026-04-26T10:24:48Z",
       "layout": "s-card"
     }
+  ],
+  "legacy": [
+    {
+      "file": "legacy_2024-02-14_xbox-360-drums-guitar.html.gz",
+      "original_url": "https://www.ebay.com/sch/i.html?Compatible%2520Product=Console%252C%2520Games%2520%2526%2520Accessories&LH_Complete=1&LH_Sold=1&_dcat=117042&_from=R40&_nkw=xbox+360+drums+and+guitar&_sacat=0&rt=nc",
+      "archived_url": "https://web.archive.org/web/20240214031804id_/https://www.ebay.com/sch/i.html?Compatible%2520Product=Console%252C%2520Games%2520%2526%2520Accessories&LH_Complete=1&LH_Sold=1&_dcat=117042&_from=R40&_nkw=xbox+360+drums+and+guitar&_sacat=0&rt=nc",
+      "captured_utc": "2024-02-14T03:18:04Z",
+      "layout": "s-item"
+    },
+    {
+      "file": "legacy_2024-03-06_vintage-lansing-buttons.html.gz",
+      "original_url": "https://www.ebay.com/sch/i.html?LH_Complete=1&LH_Sold=1&Suitable%2520For=Shirts%2520%2526%2520Blouses&_dcat=41198&_from=R40&_nkw=Vintage+Lansing+Buttons&_sacat=0&rt=nc",
+      "archived_url": "https://web.archive.org/web/20240306194900id_/https://www.ebay.com/sch/i.html?LH_Complete=1&LH_Sold=1&Suitable%2520For=Shirts%2520%2526%2520Blouses&_dcat=41198&_from=R40&_nkw=Vintage+Lansing+Buttons&_sacat=0&rt=nc",
+      "captured_utc": "2024-03-06T19:49:00Z",
+      "layout": "s-item"
+    }
   ]
 }

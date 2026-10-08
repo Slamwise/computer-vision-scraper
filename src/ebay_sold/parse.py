@@ -331,8 +331,8 @@ def _parse_s_item(card: Tag, ctx: _Context) -> Listing | None:
     _set_shipping(listing, _text(ship) if ship else None, ctx)
     _set_sold_date(
         listing,
-        _first(card, ".s-item__caption--signal", ".s-item__title--tagblock .POSITIVE", ".s-item__caption",
-               ".s-item__ended-date", ".s-item__endedDate"),
+        _first(card, ".s-item__caption--signal", ".s-item__title--tag .POSITIVE", ".s-item__title--tagblock .POSITIVE",
+               ".s-item__caption-section .POSITIVE", ".s-item__caption", ".s-item__ended-date", ".s-item__endedDate"),
         ctx,
     )
     cond = _first(card, ".s-item__subtitle .SECONDARY_INFO", ".SECONDARY_INFO")
