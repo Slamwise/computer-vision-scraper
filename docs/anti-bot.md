@@ -59,8 +59,9 @@ they score each visitor on:
    ```
 
 3. Warm up the profile once. Run `ebay-sold browser`, browse eBay normally for
-   a minute, accept the cookie banner, and optionally sign in. Then close the
-   window.
+   a minute, accept the cookie banner, and close the window. **Don't sign in to
+   your eBay account in this profile.** Logged-out browsing keeps your buying
+   and selling account out of it, and see "Terms of use" below.
 4. Keep the pacing defaults. For many queries, spread them over several runs
    or days. eBay keeps 90 days of sold history, so there's no rush.
 5. **When a challenge appears, solve it in the window** and the run continues.
@@ -100,6 +101,22 @@ volumes a personal price tracker needs don't require them.
 
 ## Terms of use
 
-eBay's User Agreement restricts automated access to its site. Keep this to
-personal research volumes, don't republish the data, and read the current
-terms yourself. This is not legal advice.
+eBay's User Agreement prohibits using "any robot, spider, scraper, data mining
+tools, data gathering and extraction tools, or other automated means" to access
+its services without eBay's prior permission. A 2026 update also names LLM-driven
+bots. Read the current agreement yourself; regional versions differ. Not legal
+advice, but the US case law suggests where the risk lies:
+
+- **Contract.** The terms bind you most clearly as a logged-in account holder.
+  In *Meta v. Bright Data* (N.D. Cal. 2024) logged-out scraping of public pages
+  was held outside Meta's terms. In *hiQ v. LinkedIn* (2022) the scraper lost on
+  breach of contract and settled. So don't scrape while signed in, and don't
+  risk an account you depend on.
+- **Circumvention.** Reading public pages is generally not "unauthorized
+  access" under the CFAA. But in *Craigslist v. 3Taps* (2013), continuing after a
+  cease-and-desist letter and an IP block, by switching IPs and proxies, was
+  held to be. If eBay blocks you or tells you to stop, stop. Don't rotate
+  proxies around it.
+- **Use of the data.** Prices and dates are facts. Titles, descriptions and
+  photos belong to the sellers. Keep the data for your own research and don't
+  republish it in bulk. The database stores image URLs, not images.

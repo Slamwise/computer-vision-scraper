@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--site", default="www.ebay.com")
     s.set_defaults(func=cmd_import_html)
 
-    s = sub.add_parser("browser", help="open the scraper's browser profile to warm it up, sign in, or solve a challenge")
+    s = sub.add_parser("browser", help="open the scraper's browser profile to warm it up or check a challenge")
     s.add_argument("--url", default="https://www.ebay.com/")
     s.add_argument("--chrome", action="store_true")
     s.set_defaults(func=cmd_browser)

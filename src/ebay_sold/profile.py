@@ -1,8 +1,9 @@
 """Open the scraper's persistent browser profile by hand.
 
-Useful before the first scrape (accept cookies, browse a little, optionally
-sign in) and after a challenge (check whether eBay still asks for verification).
-Whatever you do here, the scraper sees the same cookies next time.
+Useful before the first scrape (accept cookies, browse a little) and after a
+challenge (check whether eBay still asks for verification). Whatever you do
+here, the scraper sees the same cookies next time. Don't sign in to your eBay
+account in this profile; see docs/anti-bot.md.
 """
 
 from __future__ import annotations
