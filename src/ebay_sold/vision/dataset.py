@@ -19,6 +19,7 @@ near-duplicates into validation and inflate the scores.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import logging
 import random
@@ -77,6 +78,37 @@ def page_stem(path: str | Path) -> str:
         if name.endswith(suffix):
             return name[: -len(suffix)]
     return Path(name).stem
+
+
+def unique_stems(sources: Iterable[str | Path]) -> dict[Path, str]:
+    """A distinct name per source page, for tile file names.
+
+    ``page_stem`` alone collides for ``a/page.html.gz`` and ``b/page.html.gz``
+    (or ``x.html`` next to ``x.html.gz``), and the second page's tiles would
+    silently overwrite the first's. Colliding stems get a short hash of the path.
+    """
+    paths = _dedupe_paths(sources)
+    counts = Counter(page_stem(p) for p in paths)
+    out: dict[Path, str] = {}
+    for p in paths:
+        stem = page_stem(p)
+        if counts[stem] > 1:
+            stem = f"{stem}-{hashlib.sha1(str(p.resolve()).encode()).hexdigest()[:8]}"
+        out[p] = stem
+    return out
+
+
+def _dedupe_paths(sources: Iterable[str | Path]) -> list[Path]:
+    """Paths in order, each file once however it is spelled (relative / absolute)."""
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for s in sources:
+        p = Path(s)
+        key = p.resolve()
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
 
 
 def min_visible_for(name: str, min_visible: float | Mapping[str, float] | None = None) -> float:
@@ -178,13 +210,17 @@ def tile_ground_truth(regions: list[CardRegion], tile_box: Box, *, scale: float 
 
 def split_sources(sources: list[Path], *, val_sources: list[Path] | None = None, val_fraction: float = 0.2,
                   seed: int = 0) -> tuple[list[Path], list[Path]]:
-    """Split source pages into (train, val). Pages, not tiles, are the unit."""
-    srcs = [Path(s) for s in sources]
+    """Split source pages into (train, val). Pages, not tiles, are the unit.
+
+    A page listed twice (e.g. once relative, once absolute) counts once, so it
+    can never land in both splits.
+    """
+    srcs = _dedupe_paths(sources)
     if val_sources is not None:
-        val = [Path(v) for v in val_sources]
+        val = _dedupe_paths(val_sources)
         held = {p.resolve() for p in val}
         return [s for s in srcs if s.resolve() not in held], val
-    order = sorted(srcs, key=lambda p: p.name)
+    order = sorted(srcs, key=lambda p: (p.name, str(p.resolve())))
     random.Random(seed).shuffle(order)
     n_val = int(round(len(order) * val_fraction))
     if len(order) > 1:
@@ -247,9 +283,10 @@ async def build_dataset(sources: list[Path], out_dir: Path, *, val_sources: list
     train, val = split_sources(list(sources), val_sources=val_sources, val_fraction=val_fraction, seed=seed)
     if not train:
         raise ValueError("no training pages left after the split")
+    stems = unique_stems([*train, *val])
     summary = DatasetSummary(
         out_dir=out, data_yaml=out / "data.yaml", ground_truth=out / "ground_truth.jsonl",
-        train_pages=[page_stem(p) for p in train], val_pages=[page_stem(p) for p in val],
+        train_pages=[stems[p] for p in train], val_pages=[stems[p] for p in val],
     )
     counts: dict[str, Counter] = {"train": Counter(), "val": Counter()}
     settings = settings or BrowserSettings(headless=True)
@@ -258,7 +295,7 @@ async def build_dataset(sources: list[Path], out_dir: Path, *, val_sources: list
         for split, pages in (("train", train), ("val", val)):
             for src in pages:
                 html = read_html(src)
-                stem = page_stem(src)
+                stem = stems[src]
                 for width in viewport_widths:
                     for dsf in device_scale_factors:
                         tag = f"{stem}__w{width}_s{dsf:g}".replace(".", "p")

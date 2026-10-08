@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,7 @@ from ebay_sold.vision.dataset import (
     regions_to_yolo,
     split_sources,
     tile_ground_truth,
+    unique_stems,
     write_data_yaml,
 )
 
@@ -128,6 +130,48 @@ def test_split_is_by_page(tmp_path):
     assert val == [pages[3]] and pages[3] not in train and len(train) == 9
     # A single page is never held out (there would be nothing to train on).
     assert split_sources(pages[:1], val_fraction=0.5) == (pages[:1], [])
+
+
+def test_same_page_spelled_two_ways_is_one_page(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.html.gz").write_bytes(b"")
+    rel, absolute = Path("a.html.gz"), (tmp_path / "a.html.gz")
+    pages = [rel, absolute] + [tmp_path / f"x{i}.html" for i in range(3)]
+    for seed in range(10):
+        train, val = split_sources(pages, val_fraction=0.4, seed=seed)
+        assert len(train) + len(val) == 4
+        assert not {p.resolve() for p in train} & {p.resolve() for p in val}
+
+
+def test_unique_stems_never_collide(tmp_path):
+    a, b = tmp_path / "a" / "page.html.gz", tmp_path / "b" / "page.html.gz"
+    c, d = tmp_path / "x.html", tmp_path / "x.html.gz"
+    other = tmp_path / "sold_2026-04-26_hot-wheels.html.gz"
+    stems = unique_stems([a, b, c, d, other])
+    assert len(set(stems.values())) == 5
+    assert stems[other] == "sold_2026-04-26_hot-wheels"  # unique names are kept as they are
+    assert stems[a].startswith("page-") and stems[c].startswith("x-")
+    assert unique_stems([a, b])[a] == stems[a]  # stable: a hash of the path, not of the position
+
+
+@pytest.mark.browser
+@pytest.mark.vision
+async def test_build_dataset_keeps_pages_with_the_same_file_name_apart(require_browser, require_vision, tmp_path):
+    import shutil
+
+    src_a, src_b = tmp_path / "a" / "page.html.gz", tmp_path / "b" / "page.html.gz"
+    for src, name in ((src_a, "sold_2026-04-26_hot-wheels-r34-zamac"), (src_b, "sold_2026-04-16_ta1-adapter")):
+        src.parent.mkdir()
+        shutil.copy(EBAY_FIXTURES / f"{name}.html.gz", src)
+    out = tmp_path / "ds"
+    summary = await build_dataset([src_a, src_b], out, val_fraction=0.0, viewport_widths=(1280,), load_images=False)
+    images = list((out / "images" / "train").glob("*.png"))
+    rows = [json.loads(line) for line in (out / "ground_truth.jsonl").read_text().splitlines()]
+    assert len(images) == summary.train_images == len(rows) == len({r["image"] for r in rows})
+    assert len(set(summary.train_pages)) == 2
+    listing_lines = sum(line.startswith("0 ") for f in (out / "labels" / "train").glob("*.txt")
+                        for line in f.read_text().splitlines())
+    assert listing_lines == summary.instances["train"]["listing"]
 
 
 @pytest.mark.browser

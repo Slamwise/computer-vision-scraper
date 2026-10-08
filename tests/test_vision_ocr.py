@@ -99,3 +99,58 @@ def test_tesseract_read_many_matches_read(require_vision):
     ocr = get_ocr("tesseract")
     crops = [_render(t, size=16) for t in ("$1.00", "Pre-Owned", "Free delivery", "$23.95")]
     assert [r.text for r in read_many(ocr, crops)] == [ocr.read(c).text for c in crops]
+
+
+def test_as_bgr_accepts_gray_bgra_float_and_16_bit():
+    from ebay_sold.vision.ocr import as_bgr
+
+    gray = np.full((5, 7), 9, np.uint8)
+    assert as_bgr(gray).shape == (5, 7, 3) and as_bgr(gray).dtype == np.uint8
+    assert as_bgr(np.zeros((5, 7, 4), np.uint8)).shape == (5, 7, 3)
+    assert as_bgr(np.full((2, 2, 3), 0.8, np.float32)).max() == 204
+    assert as_bgr(np.full((2, 2), 65535, np.uint16)).max() == 255
+    with pytest.raises(ValueError):
+        as_bgr(np.zeros((2, 2, 2), np.uint8))
+
+
+def test_struck_through_price():
+    from ebay_sold.vision.ocr import struck_through
+
+    img = _render("$14.99", size=24, color=(0, 130, 0))
+    assert not struck_through(img)
+    mask = ink_mask(img)
+    rows = np.flatnonzero(mask.any(axis=1))
+    cols = np.flatnonzero(mask.any(axis=0))
+    struck = img.copy()
+    struck[(rows[0] + rows[-1]) // 2, cols[0]:cols[-1] + 1] = (0, 130, 0)
+    assert struck_through(struck)
+    assert not struck_through(_render("Sold Apr 25, 2026", size=14))
+    assert not struck_through(np.full((20, 60, 3), 255, np.uint8))
+
+
+@pytest.mark.vision
+def test_engines_read_grayscale_crops(require_vision):
+    pytest.importorskip("rapidocr_onnxruntime")
+    import cv2
+
+    gray = cv2.cvtColor(_render("$65.00", size=20), cv2.COLOR_BGR2GRAY)
+    assert parse_money(get_ocr("rapidocr").read(gray).text).amount == 65.0
+    if tesseract_available():
+        assert parse_money(get_ocr("tesseract").read(gray).text).amount == 65.0
+
+
+def test_tesseract_does_not_change_the_process_environment(monkeypatch):
+    if not tesseract_available():
+        pytest.skip("tesseract binary not installed")
+    import os
+
+    from ebay_sold.vision.ocr import TesseractEngine
+
+    monkeypatch.delenv("OMP_THREAD_LIMIT", raising=False)
+    engine = TesseractEngine()
+    engine.read(_render("Pre-Owned", size=16))
+    # A process-wide OMP_THREAD_LIMIT=1 would also cap torch's thread pool (YOLO ran ~1.8x slower).
+    assert "OMP_THREAD_LIMIT" not in os.environ
+    assert engine._env()["OMP_THREAD_LIMIT"] == "1"
+    monkeypatch.setenv("OMP_THREAD_LIMIT", "3")
+    assert engine._env()["OMP_THREAD_LIMIT"] == "3"  # an explicit setting is respected

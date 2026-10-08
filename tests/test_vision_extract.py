@@ -16,6 +16,7 @@ from ebay_sold.vision.extract import (  # noqa: E402
     extract_listings,
     extract_listings_detailed,
     extract_page,
+    extract_page_detailed,
     reading_order,
 )
 from ebay_sold.vision.ocr import OcrResult  # noqa: E402
@@ -261,6 +262,37 @@ async def test_trained_detector_reads_a_rendered_tile(require_browser, require_v
     assert all(lst.extraction == "vision" for lst in listings)
 
 
+@pytest.mark.browser
+@pytest.mark.vision
+@pytest.mark.slow
+@pytest.mark.skipif(not WEIGHTS.exists(), reason="no trained weights at data/models/ebay-sold-yolo.pt")
+async def test_trained_detector_on_retina_tiles_and_single_card_crops(require_browser, require_vision, tmp_path):
+    """Regressions found in review: at device scale factor 2 a card cut by an inner window seam lost its
+    shipping row, and single-card crops lost the end of long titles. Held-out page, real model."""
+    from conftest import load_fixture
+
+    from ebay_sold.capture import capture_cards, capture_tiles, card_regions, render_html
+    from ebay_sold.vision.detector import Detector
+    from ebay_sold.vision.evaluate import match_cards, score_pair
+    from ebay_sold.vision.ocr import get_ocr
+
+    async with render_html(load_fixture("sold_2026-04-24_sears-roebuck-magazine"), device_scale_factor=2,
+                           load_images=False) as page:
+        regions = await card_regions(page)
+        tiles = await capture_tiles(page, tmp_path / "tiles", tile_height=1280, overlap=160)
+        cards = await capture_cards(page, tmp_path / "cards", regions=regions[:10])
+    detector, ocr = Detector(WEIGHTS), get_ocr("rapidocr")
+    preds = extract_page_detailed(tiles, detector=detector, ocr=ocr, today=TODAY)
+    pairs = match_cards(preds, regions)
+    assert len(pairs) == len(regions) == len(preds)
+    for i, j in pairs:
+        scores = score_pair(preds[i], regions[j], today=TODAY)
+        assert scores["shipping"][0] and scores["price"][0], (regions[j].item_id, scores)
+    for region, path in cards:
+        (e,) = extract_listings_detailed(path, detector=detector, ocr=ocr, today=TODAY)
+        assert score_pair(e, region, today=TODAY)["title"][0], (region.texts["title"], e.listing.title)
+
+
 # --- scoring against the DOM ---------------------------------------------------------------------------
 
 
@@ -306,3 +338,240 @@ def test_title_crop_stops_at_the_next_field_and_drops_new_listing_tag():
     ocr = FakeOcr({40: "NEW LISTING Hot Wheels Zamac", 41: "$5.00"})
     (lst,) = extract_listings(img, detector=FakeDetector(dets), ocr=ocr, today=TODAY)
     assert lst.title == "Hot Wheels Zamac" and lst.price == 5.0
+
+
+# --- titles vs conditions: the title's ink decides ---------------------------------------------------------
+
+
+class LinesOcr:
+    """Reads each text line of a crop as the text its fill colour stands for."""
+
+    name = "lines"
+
+    def __init__(self, table: dict[int, str]) -> None:
+        self.table = table
+
+    def read(self, image):
+        from ebay_sold.vision.ocr import ink_mask, text_lines
+
+        mask = ink_mask(image)
+        words = []
+        for y0, y1 in text_lines(mask):
+            values = image[y0:y1, :, 0][mask[y0:y1]]
+            words.append(self.table.get(int(np.bincount(values).argmax()), "?"))
+        return OcrResult(text=" ".join(words), conf=0.9)
+
+
+# Title lines in eBay's near-black (two slightly different values so the OCR fake can tell
+# them apart), the condition in eBay's grey, price and sold date in other colours.
+INK = {25: "Vintage Sears Catalog 1970 Mint", 26: "Condition Rare", 120: "Pre-Owned", 60: "$29.99",
+       90: "Sold Apr 20, 2026"}
+
+
+def _two_line_title_card(*, condition_line: bool = True):
+    """Sold date, a title wrapped onto two lines, a grey condition line, a price."""
+    img = np.full((240, 480, 3), 255, np.uint8)
+    img[10:26, 200:330] = 90      # sold date
+    img[34:50, 200:440] = 25      # title, line 1
+    img[54:70, 200:380] = 26      # title, line 2
+    if condition_line:
+        img[76:92, 200:290] = 120  # condition (grey)
+    img[100:124, 200:270] = 60    # price
+    base = [det("listing", 0, 0, 480, 240), det("sold_date", 200, 10, 130, 16), det("price", 200, 100, 70, 24)]
+    return img, base
+
+
+def test_second_title_line_detected_as_condition_is_folded_back_into_the_title():
+    # Seen at widths 1024 and 1280: the title box covers line 1 only and line 2 is called "condition".
+    img, base = _two_line_title_card(condition_line=False)
+    dets = base + [det("title", 200, 34, 240, 16), det("condition", 200, 54, 180, 16)]
+    (lst,) = extract_listings(img, detector=FakeDetector(dets), ocr=LinesOcr(INK), today=TODAY)
+    assert lst.title == "Vintage Sears Catalog 1970 Mint Condition Rare"
+    assert lst.condition is None
+
+
+def test_false_condition_inside_the_title_box_does_not_hide_the_real_condition():
+    # Title box spans both lines; the more confident "condition" is the title's second line,
+    # the real (grey) condition line below is detected with lower confidence.
+    img, base = _two_line_title_card()
+    dets = base + [det("title", 200, 34, 240, 36), det("condition", 200, 54, 180, 16, 0.9),
+                   det("condition", 200, 76, 90, 16, 0.6)]
+    (lst,) = extract_listings(img, detector=FakeDetector(dets), ocr=LinesOcr(INK), today=TODAY)
+    assert (lst.title, lst.condition) == ("Vintage Sears Catalog 1970 Mint Condition Rare", "Pre-Owned")
+
+
+def test_title_box_reaching_into_a_grey_condition_line_is_still_trimmed():
+    img = np.full((240, 480, 3), 255, np.uint8)
+    img[34:50, 200:440] = 25   # one-line title
+    img[54:70, 200:290] = 120  # condition right below it
+    img[100:124, 200:270] = 60
+    dets = [det("listing", 0, 0, 480, 240), det("title", 200, 34, 240, 32), det("condition", 200, 54, 90, 16),
+            det("price", 200, 100, 70, 24)]
+    (lst,) = extract_listings(img, detector=FakeDetector(dets), ocr=LinesOcr(INK), today=TODAY)
+    assert (lst.title, lst.condition) == ("Vintage Sears Catalog 1970 Mint", "Pre-Owned")
+
+
+def test_title_box_covering_only_the_first_line_is_extended_over_the_second():
+    # Seen at width 800: line 2 is not detected at all.
+    img, base = _two_line_title_card()
+    dets = base + [det("title", 200, 34, 240, 16), det("condition", 200, 76, 90, 16)]
+    (lst,) = extract_listings(img, detector=FakeDetector(dets), ocr=LinesOcr(INK), today=TODAY)
+    assert (lst.title, lst.condition) == ("Vintage Sears Catalog 1970 Mint Condition Rare", "Pre-Owned")
+    # ...but never over a grey line, nor over a line another field claims.
+    img2, base2 = _two_line_title_card()
+    img2[54:70, 200:380] = 120
+    (lst2,) = extract_listings(img2, detector=FakeDetector(base2 + [det("title", 200, 34, 240, 16)]),
+                               ocr=LinesOcr(INK), today=TODAY)
+    assert lst2.title == "Vintage Sears Catalog 1970 Mint"
+
+
+def test_title_box_covering_only_the_second_line_is_extended_upwards_but_not_over_the_sold_date():
+    img, base = _two_line_title_card()
+    dets = base + [det("title", 200, 54, 180, 16), det("condition", 200, 76, 90, 16)]
+    (e,) = extract_listings_detailed(img, detector=FakeDetector(dets), ocr=LinesOcr(INK), today=TODAY)
+    assert (e.listing.title, e.listing.condition) == ("Vintage Sears Catalog 1970 Mint Condition Rare", "Pre-Owned")
+    assert e.listing.sold_date == date(2026, 4, 20)
+    title = e.fields["title"]
+    assert (title.x, title.y, title.x + title.w, title.y + title.h) == (200, 34, 440, 70)  # line 1 is the longer one
+
+
+def test_condition_box_on_a_seller_tagline_moves_to_the_condition_line_below():
+    # Seller taglines share the condition's grey and are drawn above it; eBay draws the condition last.
+    img = np.full((240, 480, 3), 255, np.uint8)
+    img[34:50, 200:440] = 25    # title
+    img[54:70, 200:420] = 121   # tagline (grey)
+    img[74:90, 200:290] = 120   # condition (grey)
+    img[100:124, 200:270] = 60  # price
+    dets = [det("listing", 0, 0, 480, 240), det("title", 200, 34, 240, 16), det("condition", 200, 54, 220, 16),
+            det("price", 200, 100, 70, 24)]
+    ocr = LinesOcr({**INK, 121: "FREE AND FAST SHIPPING. FREE RETURNS."})
+    (lst,) = extract_listings(img, detector=FakeDetector(dets), ocr=ocr, today=TODAY)
+    assert (lst.title, lst.condition, lst.price) == ("Vintage Sears Catalog 1970 Mint", "Pre-Owned", 29.99)
+
+
+def test_overlapping_partial_boxes_of_one_field_are_joined():
+    # A long title split into two overlapping boxes (single-card crops): keep both halves.
+    card = det("listing", 0, 0, 945, 264)
+    parts = [det("title", 277, 34, 437, 16, 0.75), det("title", 413, 34, 430, 16, 0.5)]
+    ((_, fields),) = assign_fields([card, *parts])
+    assert (fields["title"].box.x, fields["title"].box.x + fields["title"].box.w) == (277, 843)
+    assert fields["title"].conf == 0.75
+
+
+# --- conversion guards -------------------------------------------------------------------------------------
+
+
+def test_rows_mistaken_for_shipping_are_not_a_shipping_cost():
+    from ebay_sold.vision.extract import _to_listing
+
+    def ship(text):
+        lst = _to_listing({"title": "x", "shipping": text}, site="www.ebay.com", today=TODAY)
+        return lst.shipping, lst.shipping_text
+
+    assert ship("Free returns") == (None, None)       # was 0.0: "free shipping"
+    assert ship("or Best Offer") == (None, None)
+    assert ship("from Canada") == (None, None)
+    assert ship("+$5.55 shipping") == (5.55, "+$5.55 shipping")
+    assert ship("+$9.45 delivery") == (9.45, "+$9.45 delivery")
+    assert ship("Free delivery") == (0.0, "Free delivery")
+    assert ship("Free shipping Free returns")[0] == 0.0
+    assert ship("+$5.83") == (5.83, "+$5.83")
+    assert ship("Delivery in 2-4 days") == (None, "Delivery in 2-4 days")
+
+
+def test_site_is_normalised_like_the_other_extractors():
+    img = np.full((100, 400, 3), 255, np.uint8)
+    img[10:30, 10:310] = 1
+    img[40:60, 10:110] = 2
+    img[70:90, 10:110] = 3
+    dets = [det("listing", 0, 0, 400, 100), det("title", 10, 10, 300, 20), det("price", 10, 40, 100, 20),
+            det("sold_date", 10, 70, 100, 20)]
+    ocr = FakeOcr({1: "Hockey cards lot", 2: "$12.00", 3: "Sold 05/04/2026"})
+    (uk,) = extract_listings(img, detector=FakeDetector(dets), ocr=ocr, site="ebay.co.uk", today=TODAY)
+    assert (uk.site, uk.currency, uk.sold_date) == ("www.ebay.co.uk", "GBP", date(2026, 4, 5))  # day first
+    (us,) = extract_listings(img, detector=FakeDetector(dets), ocr=ocr, site="https://www.ebay.com/", today=TODAY)
+    assert (us.site, us.currency, us.sold_date) == ("www.ebay.com", "USD", date(2026, 5, 4))
+    with pytest.raises(ValueError):
+        extract_listings(img, detector=FakeDetector(dets), ocr=ocr, site="example.com")
+
+
+def test_ocr_price_without_its_decimal_point():
+    from ebay_sold.vision.extract import _to_listing
+
+    assert _to_listing({"title": "x", "price": "$3718"}, site="www.ebay.com", today=TODAY).price == 37.18
+
+
+def test_extract_page_rejoins_a_card_cut_by_a_tile_edge_with_a_small_overlap(tmp_path):
+    import cv2
+
+    # Card B (y 560..800) is cut by the tile edge; the tiles overlap by only 40 px, so its two
+    # pieces share far less than the containment threshold. Its shipping row is only in tile 1.
+    page = np.full((1500, 1000, 3), 255, np.uint8)
+    dets = _card(page, 0, 100, "A") + _card(page, 0, 560, "B") + _card(page, 0, 1200, "C")
+    windows = [(0, 700), (660, 1500)]
+    tiles = []
+    for i, (y0, y1) in enumerate(windows):
+        tile = page[y0:y1].copy()
+        tile[0, 0] = (255, i, 255)
+        path = tmp_path / f"tile{i}.png"
+        cv2.imwrite(str(path), tile)
+        tiles.append((path, Box(x=0, y=y0, w=1000, h=y1 - y0)))
+    detailed = extract_page_detailed(tiles, detector=FakeDetector(dets, windows), ocr=FakeOcr(_table()), today=TODAY)
+    assert len(detailed) == 3
+    b = detailed[1]
+    assert (b.box.y, b.box.y + b.box.h) == (560, 800)
+    assert (b.listing.price, b.listing.shipping, b.listing.condition) == (3.75, 0.0, "Pre-Owned")
+
+
+# --- scoring: invented fields and layouts with other card shapes -------------------------------------------
+
+
+def test_score_pair_counts_invented_fields_as_errors():
+    from ebay_sold.models import CardRegion, Listing
+    from ebay_sold.vision.evaluate import score_pair
+    from ebay_sold.vision.extract import ExtractedListing
+
+    region = CardRegion(item_id="1", box=Box(x=0, y=0, w=800, h=250),
+                        texts={"price": "$65.00", "sold_date": "Sold Apr 25, 2026", "title": "A catalog"})
+    invented = ExtractedListing(listing=Listing(title="A catalog", price=65.0, sold_date=date(2026, 4, 25),
+                                                condition="Blue MINT", shipping=0.0),
+                                box=Box(x=0, y=0, w=800, h=250))
+    scores = score_pair(invented, region, today=TODAY)
+    assert scores["condition"] == (False, None, "Blue MINT")
+    assert scores["shipping"] == (False, None, 0.0)
+    assert scores["price"][0] and scores["title"][0]
+    clean = invented.model_copy(deep=True)
+    clean.listing.condition = clean.listing.shipping = None
+    assert all(ok for ok, _, _ in score_pair(clean, region, today=TODAY).values())
+
+
+def test_match_cards_falls_back_to_field_positions():
+    from ebay_sold.models import CardRegion, Listing
+    from ebay_sold.vision.evaluate import match_cards
+    from ebay_sold.vision.extract import ExtractedListing
+
+    # Legacy layout: the DOM card spans the whole row, the detector's card box also covers the filter
+    # sidebar and stops early (IoU ~0.4), but its fields are inside the DOM card.
+    regions = [CardRegion(item_id=str(i), box=Box(x=237, y=314 + 250 * i, w=1113, h=230)) for i in range(2)]
+    preds = [ExtractedListing(listing=Listing(title="t"), box=Box(x=0, y=320 + 250 * i, w=810, h=223),
+                              fields={"title": Box(x=253, y=339 + 250 * i, w=605, h=18),
+                                      "price": Box(x=253, y=400 + 250 * i, w=100, h=24)})
+             for i in (1, 0)]
+    assert sorted(match_cards(preds, regions)) == [(0, 1), (1, 0)]
+    # A card box with no fields inside the DOM card is still not a match.
+    stray = ExtractedListing(listing=Listing(title="t"), box=Box(x=0, y=320, w=810, h=223),
+                             fields={"title": Box(x=20, y=339, w=150, h=18)})
+    assert match_cards([stray], regions) == []
+
+
+def test_struck_out_asking_price_is_the_original_price_not_the_sale_price():
+    # "Best offer accepted": eBay strikes out the asking price and does not show what was paid.
+    img = np.full((240, 480, 3), 255, np.uint8)
+    img[34:50, 200:440] = 25
+    for x in range(200, 270, 10):
+        img[100:124, x:x + 7] = 60  # glyphs with gaps between them
+    img[111:113, 198:272] = 60  # the strike line, a little wider than the digits
+    dets = [det("listing", 0, 0, 480, 240), det("title", 200, 34, 240, 16), det("price", 200, 100, 70, 24)]
+    (lst,) = extract_listings(img, detector=FakeDetector(dets), ocr=FakeOcr({25: "Controller", 60: "$65.99"}),
+                              today=TODAY)
+    assert (lst.price, lst.original_price, lst.currency, lst.price_text) == (None, 65.99, "USD", "$65.99")

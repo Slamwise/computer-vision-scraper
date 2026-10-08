@@ -7,10 +7,19 @@ The pipeline per image (or per tiled page):
 2. Each field goes to the card that contains most of it. A crop of a single
    card usually has no ``listing`` box of its own, so fields without any card
    box are treated as one card.
-3. Field crops are cut from the *original* pixels with a few pixels of margin
+3. Titles are checked against the pixels. eBay draws a title in near-black ink
+   and everything around it (condition, shipping, sold date, price) in grey or
+   colour, while the detector sometimes boxes only the first line of a wrapped
+   title, or calls the second line a "condition". A "condition" drawn in title
+   ink directly under the title is folded back into it, and a title box is
+   extended over following lines in the same ink.
+4. Field crops are cut from the *original* pixels with a few pixels of margin
    (detector boxes are a little tight or loose) and read by an ``OcrEngine``.
-4. Text becomes typed values only through ``ebay_sold.normalize``, so vision
-   output is parsed exactly like DOM output.
+5. Text becomes typed values only through ``ebay_sold.normalize``, so vision
+   output is parsed exactly like DOM output. Rows the detector mistakes for
+   shipping ("Free returns", "or Best Offer") are not read as a shipping cost,
+   and a struck-out price (an accepted best offer) is the original price, not
+   the sale price, as in the DOM parser.
 
 For a page captured as overlapping tiles (``capture.capture_tiles``),
 ``extract_page`` detects on every tile, maps the boxes into one page-wide
@@ -31,9 +40,9 @@ from pydantic import BaseModel, Field
 
 from ..models import Box, Listing
 from ..normalize import clean_text, parse_money, parse_shipping, parse_sold_date
-from ..urls import SITE_CURRENCY
-from .detector import Detection, containment, load_image, merge_detections
-from .ocr import read_many
+from ..urls import SITE_CURRENCY, normalize_site
+from .detector import Detection, containment, load_image, merge_detections, union_box
+from .ocr import ink_mask, read_many, struck_through, text_lines
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy as np
@@ -49,7 +58,23 @@ _DAY_FIRST_SITES = {"www.ebay.co.uk", "www.ebay.com.au", "www.ebay.de", "www.eba
 
 
 class DetectorLike(Protocol):
+    """``Detector`` or a stand-in. ``detect`` may also accept ``scale=`` (image px per CSS px)."""
+
     def detect(self, image: Any) -> list[Detection]: ...
+
+
+def _detect(detector: DetectorLike, image: Any, scale: float | None) -> list[Detection]:
+    """``detector.detect``, passing the known scale when the detector accepts it."""
+    import inspect
+
+    if scale is not None:
+        try:
+            params = inspect.signature(detector.detect).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "scale" in params or any(p.kind is p.VAR_KEYWORD for p in params.values()):
+            return detector.detect(image, scale=scale)
+    return detector.detect(image)
 
 
 class ExtractedListing(BaseModel):
@@ -72,7 +97,9 @@ def assign_fields(dets: Sequence[Detection], *, min_containment: float = 0.5,
     """Group field detections under card (``listing``) detections.
 
     Each field goes to the card containing the largest share of it (at least
-    ``min_containment``); per card and class the most confident field wins.
+    ``min_containment``). Two boxes of one class in one card that overlap are
+    two partial readings of one line (the detector can split a long title in
+    two) and are joined; otherwise the most confident wins.
     Without any card box (a crop of a single card), all fields form one card
     spanning ``image_size`` (``(width, height)``) or the fields' union, unless
     ``allow_synthetic`` is false.
@@ -107,7 +134,12 @@ def assign_fields(dets: Sequence[Detection], *, min_containment: float = 0.5,
         if best_i < 0 or (best_c < min_containment and not synthetic):
             continue
         current = groups[best_i].get(f.cls)
-        if current is None or f.conf > current.conf:
+        if current is None:
+            groups[best_i][f.cls] = f
+        elif f.cls != "image" and f.box.intersection(current.box) > 0:
+            groups[best_i][f.cls] = Detection(cls=f.cls, conf=max(f.conf, current.conf),
+                                              box=union_box(f.box, current.box))
+        elif f.conf > current.conf:
             groups[best_i][f.cls] = f
     return list(zip(cards, groups))
 
@@ -140,6 +172,11 @@ class _Pixels:
         self.height = max(y + a.shape[0] for y, a in strips)
 
     def crop(self, box: Box, pad: int = 3, pad_x: int | None = None) -> "np.ndarray | None":
+        found = self.crop_at(box, pad, pad_x)
+        return None if found is None else found[0]
+
+    def crop_at(self, box: Box, pad: int = 3, pad_x: int | None = None) -> "tuple[np.ndarray, int, int] | None":
+        """``(crop, x0, y0)``: the pixels around ``box`` and where the crop's top-left corner is."""
         pad_x = pad if pad_x is None else pad_x
         x0, y0 = int(max(0, box.x - pad_x)), int(max(0, box.y - pad))
         x1 = int(min(self.width, box.x + box.w + pad_x + 0.999))
@@ -159,7 +196,8 @@ class _Pixels:
         if best is None or best_key[1] < 2:
             return None
         off, arr = best
-        return arr[max(0, y0 - off):min(arr.shape[0], y1 - off), x0:min(x1, arr.shape[1])]
+        top = max(0, y0 - off)
+        return arr[top:min(arr.shape[0], y1 - off), x0:min(x1, arr.shape[1])], x0, top + off
 
 
 def _trim_against(box: Box, others: Sequence[Box]) -> Box:
@@ -181,31 +219,193 @@ def _trim_against(box: Box, others: Sequence[Box]) -> Box:
     return Box(x=box.x, y=top, w=box.w, h=max(1.0, bottom - top))
 
 
+def ink_style(image: "np.ndarray | None") -> tuple[float, float] | None:
+    """``(contrast, saturation)`` of a crop's text pixels (medians, 0-255); ``None`` if there is no text.
+
+    Tells eBay's text styles apart: titles are near-black (contrast ~170 on
+    white, unsaturated), conditions and shipping lines grey (~110), prices and
+    sold dates green (saturation ~175).
+    """
+    import cv2
+    import numpy as np
+
+    if image is None or image.size == 0:
+        return None
+    mask = ink_mask(image)
+    if mask.sum() < 4:
+        return None
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.int16)
+    bg = float(np.median(np.concatenate([gray[0], gray[-1], gray[:, 0], gray[:, -1]])))
+    sat = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[:, :, 1]
+    return float(np.median(np.abs(gray - bg)[mask])), float(np.median(sat[mask]))
+
+
+def _same_ink(a: tuple[float, float] | None, b: tuple[float, float] | None) -> bool:
+    """Same text style: contrast within 20 % and the same colourfulness."""
+    if a is None or b is None:
+        return False
+    return min(a[0], b[0]) >= 0.8 * max(a[0], b[0]) and abs(a[1] - b[1]) <= 60
+
+
+def _below(title: Box, line: Box, line_h: float) -> bool:
+    """``line`` is the title's next line: left-aligned with it, starting inside it or right under it."""
+    return (abs(line.x - title.x) <= 1.5 * line_h
+            and line.y + line.h / 2 > title.y + 0.5 * line_h
+            and line.y < title.y + title.h + 0.75 * line_h)
+
+
+def _absorb_title_lines(pixels: "_Pixels", dets: Sequence[Detection]) -> list[Detection]:
+    """Fold "condition" boxes that are really a title's next line back into the title.
+
+    Runs before fields are grouped by card, so a card's real (grey) condition
+    line is still there to be picked once the false one is gone.
+    """
+    out = list(dets)
+    titles = [i for i, d in enumerate(out) if d.cls == "title"]
+    drop: set[int] = set()
+    for ci, cond in enumerate(dets):
+        if cond.cls != "condition" or not titles:
+            continue
+        near = [ti for ti in titles if _below(out[ti].box, cond.box, cond.box.h)]
+        if not near:
+            continue
+        ti = min(near, key=lambda i: abs(cond.box.y - out[i].box.y - out[i].box.h))
+        title = out[ti]
+        if not _same_ink(ink_style(pixels.crop(title.box, pad=2)), ink_style(pixels.crop(cond.box, pad=2))):
+            continue  # a real condition line (grey), maybe overlapped by a loose title box
+        out[ti] = title.model_copy(update={"box": union_box(title.box, cond.box)})
+        drop.add(ci)
+    return [d for i, d in enumerate(out) if i not in drop]
+
+
+def _adjacent_line(pixels: "_Pixels", box: Box, others: Sequence[Box], line_h: float, ink: tuple[float, float],
+                   *, up: bool, right: float | None = None) -> Box | None:
+    """The text line right below (``up=False``) or above ``box`` if it is drawn the same way, else ``None``.
+
+    Same way: starts at the box's left edge, at line spacing, a text line's
+    height, the same ink, and not part of another detected field. The line may
+    be longer than ``box`` (the first line of a wrapped title is); it is
+    followed rightwards up to ``right`` (the card's edge) until a gap wider
+    than a word space.
+    """
+    x0 = box.x - 0.5 * line_h
+    width = max(box.w + line_h, (right - x0) if right is not None else 0.0)
+    region = Box(x=x0, y=box.y - 2.0 * line_h if up else box.y + box.h, w=width, h=2.0 * line_h)
+    found = pixels.crop_at(region, pad=0)
+    if found is None:
+        return None
+    crop, cx, cy = found
+    mask = ink_mask(crop)
+    # Find the line in the box's own column (other columns of the card may hold text at other heights);
+    # skip slivers of the box's own glyphs (descenders, accents) poking out of a tight box.
+    column = mask[:, :max(1, int(round(box.x + box.w + 0.5 * line_h - cx)))]
+    edge = crop.shape[0] if up else 0
+    lines = [(a, b) for a, b in text_lines(column) if not ((b if up else a) == edge and b - a < 0.5 * line_h)]
+    if not lines:
+        return None
+    y0, y1 = lines[-1] if up else lines[0]
+    # Ink of a following line starts ~0.6 line heights below a line's box (line spacing + ascender room).
+    gap = box.y - (cy + y1) if up else cy + y0 - (box.y + box.h)
+    if gap > 0.9 * line_h or not 0.5 * line_h <= y1 - y0 <= 1.5 * line_h:
+        return None
+    cols = mask[y0:y1].any(axis=0).nonzero()[0]
+    gaps = (cols[1:] - cols[:-1] > 1.5 * line_h).nonzero()[0]
+    end = cols[gaps[0]] if len(gaps) else cols[-1]  # stop at another column of text
+    line = Box(x=float(cx + cols[0]), y=float(cy + y0), w=float(end - cols[0] + 1), h=float(y1 - y0))
+    if abs(line.x - box.x) > line_h or any(o.intersection(line) > 0.3 * line.area for o in others):
+        return None
+    return line if _same_ink(ink, ink_style(pixels.crop(line, pad=2))) else None
+
+
+def _extend_title(pixels: "_Pixels", title: Box, others: Sequence[Box], line_h: float, *,
+                  max_lines: int = 2, right: float | None = None) -> Box:
+    """Grow a title box over adjacent lines drawn in the title's ink.
+
+    The detector sometimes boxes only one line of a wrapped title. A line
+    belongs to the title when it starts at the title's left edge, follows at
+    line spacing, has a text line's height, is drawn in the same near-black
+    ink and is not another detected field. eBay draws the sold date (green)
+    above a title and the subtitle / condition (grey) below it, so the growth
+    stops there.
+    """
+    if line_h <= 0:
+        return title
+    ink = ink_style(pixels.crop(title, pad=2))
+    if ink is None:
+        return title
+    for up, limit in ((False, max_lines), (True, 1)):
+        for _ in range(limit):
+            line = _adjacent_line(pixels, title, others, line_h, ink, up=up, right=right)
+            if line is None:
+                break
+            title = union_box(title, line)
+    return title
+
+
+def _last_subtitle_line(pixels: "_Pixels", cond: Box, others: Sequence[Box], line_h: float, *,
+                        max_lines: int = 3) -> Box:
+    """Move a condition box down to the last line of the grey subtitle block it is in.
+
+    Sellers can add tagline subtitles ("FREE AND FAST SHIPPING") in the same
+    grey as the condition, and eBay always draws the condition line last
+    (the DOM parser relies on the same rule), so a box on a tagline moves to
+    the line below it.
+    """
+    ink = ink_style(pixels.crop(cond, pad=2)) if line_h > 0 else None
+    if ink is None:
+        return cond
+    for _ in range(max_lines):
+        line = _adjacent_line(pixels, cond, others, line_h, ink, up=False)
+        if line is None:
+            break
+        cond = line
+    return cond
+
+
 # --- conversion -----------------------------------------------------------------------
 
 # eBay prefixes fresh listings with a "NEW LISTING" tag on the title line; the DOM
 # parser leaves it out of the title, so vision does too.
 _NEW_LISTING_RE = re.compile(r"^\s*new\s*listing\b[\s:-]*", re.IGNORECASE)
+# Rows the detector can mistake for the shipping line. "Free returns" must not
+# become free shipping (capture.card_regions skips these rows for the same reason).
+_RETURNS_RE = re.compile(r"\breturns?\b|r[üu]ckgabe|\bretours?\b|\bresi\b|devoluci", re.IGNORECASE)
+_SHIPPING_WORD_RE = re.compile(r"deliver|shipping|postage|versand|livraison|spedizione|env[ií]o|lieferung",
+                               re.IGNORECASE)
 
 
-def _to_listing(texts: dict[str, str], *, site: str, today: date | None) -> Listing:
+def _shipping(text: str, currency: str | None) -> tuple[float | None, str | None]:
+    """``(cost, text)`` for an OCR'd shipping box; ``(None, None)`` when it is not a shipping line."""
+    text = clean_text(text)
+    if not text or (_RETURNS_RE.search(text) and not _SHIPPING_WORD_RE.search(text)):
+        return None, None
+    cost = parse_shipping(text, currency, ocr=True)
+    if cost is None and not _SHIPPING_WORD_RE.search(text):
+        return None, None  # "or Best Offer", "from Canada": some other row
+    return cost, text
+
+
+def _to_listing(texts: dict[str, str], *, site: str, today: date | None, struck_price: bool = False) -> Listing:
     currency = SITE_CURRENCY.get(site)
     title = _NEW_LISTING_RE.sub("", clean_text(texts.get("title")))
     data: dict[str, Any] = {"site": site, "title": title, "extraction": "vision", "item_id": None}
     if "price" in texts:
         data["price_text"] = clean_text(texts["price"]) or None
-        money = parse_money(texts["price"], currency)
-        if money:
+        money = parse_money(texts["price"], currency, ocr=True)
+        if money and struck_price:
+            # An accepted best offer: eBay strikes out the asking price and does not
+            # show what was paid. Like the DOM parser, keep it as the original price.
+            data.update(original_price=money.amount, currency=money.currency)
+        elif money:
             data.update(price=money.amount, price_max=money.amount_max, currency=money.currency)
     if "shipping" in texts:
-        data["shipping_text"] = clean_text(texts["shipping"]) or None
-        data["shipping"] = parse_shipping(texts["shipping"], currency)
+        data["shipping"], data["shipping_text"] = _shipping(texts["shipping"], currency)
     if "sold_date" in texts:
         data["sold_date_text"] = clean_text(texts["sold_date"]) or None
         data["sold_date"] = parse_sold_date(texts["sold_date"], today, day_first=site in _DAY_FIRST_SITES)
     if "condition" in texts:
         data["condition"] = clean_text(texts["condition"]) or None
-    if data.get("currency") is None and data.get("price") is not None:
+    if data.get("currency") is None and (data.get("price") is not None or data.get("original_price") is not None):
         data["currency"] = currency
     return Listing(**data)
 
@@ -213,7 +413,8 @@ def _to_listing(texts: dict[str, str], *, site: str, today: date | None) -> List
 def _confidence(card_conf: float, field_conf: dict[str, float], listing: Listing, texts: dict[str, str]) -> float:
     key = [field_conf[k] for k in ("title", "price", "sold_date") if k in field_conf]
     conf = card_conf * (sum(key) / len(key) if key else 0.5)
-    if "price" in texts and listing.price is None and "see price" not in texts["price"].lower():
+    if ("price" in texts and listing.price is None and listing.original_price is None
+            and "see price" not in texts["price"].lower()):
         conf *= 0.5  # a price box we could not parse
     if "price" not in texts:
         conf *= 0.7
@@ -230,14 +431,25 @@ def _extract(pixels: _Pixels, dets: list[Detection], *, ocr: "OcrEngine", site: 
     def to_out(b: Box) -> Box:
         return Box(x=ox + b.x / scale, y=oy + b.y / scale, w=b.w / scale, h=b.h / scale)
 
-    groups = assign_fields(dets, image_size=image_size, allow_synthetic=allow_synthetic)
+    groups = assign_fields(_absorb_title_lines(pixels, dets), image_size=image_size,
+                           allow_synthetic=allow_synthetic)
     # Cut every crop first and OCR them in one call, so engines can work in parallel.
     jobs: list[tuple[int, str, float]] = []
     crops = []
-    for gi, (_, fields) in enumerate(groups):
+    struck: set[int] = set()
+    for gi, (card, fields) in enumerate(groups):
         text_boxes = [f.box for k, f in fields.items() if k in TEXT_FIELDS]
         # The shortest text box is one line tall (titles can be two).
         line_h = min((b.h for b in text_boxes), default=0.0)
+        if "title" in fields:
+            others = [f.box for k, f in fields.items() if k != "title"]
+            grown = _extend_title(pixels, fields["title"].box, others, line_h, right=card.box.x + card.box.w)
+            fields["title"] = fields["title"].model_copy(update={"box": grown})
+        if "condition" in fields:
+            others = [f.box for k, f in fields.items() if k != "condition"]
+            moved = _last_subtitle_line(pixels, fields["condition"].box, others, line_h)
+            fields["condition"] = fields["condition"].model_copy(update={"box": moved})
+        groups[gi] = (card, fields)
         for name in TEXT_FIELDS:
             det = fields.get(name)
             if det is None:
@@ -250,15 +462,17 @@ def _extract(pixels: _Pixels, dets: list[Detection], *, ocr: "OcrEngine", site: 
             if crop is not None:
                 jobs.append((gi, name, det.conf))
                 crops.append(crop)
+                if name == "price" and struck_through(crop):
+                    struck.add(gi)
     read: list[tuple[dict[str, str], dict[str, float]]] = [({}, {}) for _ in groups]
     for (gi, name, det_conf), res in zip(jobs, read_many(ocr, crops)):
         if res.text.strip():
             read[gi][0][name] = res.text
             read[gi][1][name] = round(det_conf * res.conf, 4)
 
-    for (card, fields), (texts, fconf) in zip(groups, read):
-        listing = _to_listing(texts, site=site, today=today)
-        if listing.price is None and not listing.title:
+    for gi, ((card, fields), (texts, fconf)) in enumerate(zip(groups, read)):
+        listing = _to_listing(texts, site=site, today=today, struck_price=gi in struck)
+        if listing.price is None and listing.original_price is None and not listing.title:
             continue
         listing.confidence = _confidence(card.conf, fconf, listing, texts)
         out.append(ExtractedListing(
@@ -298,10 +512,12 @@ def extract_listings_detailed(image: "ImageInput", *, detector: DetectorLike, oc
                               site: str = "www.ebay.com", today: date | None = None,
                               page_offset: Box | None = None, pad: int = 3) -> list[ExtractedListing]:
     """Like ``extract_listings`` but also returns boxes, raw OCR text and per-field confidence."""
+    site = normalize_site(site)
     arr = load_image(image)
     h, w = arr.shape[:2]
-    dets = detector.detect(arr)
-    scale = (w / page_offset.w) if page_offset is not None and page_offset.w > 0 else 1.0
+    known = page_offset is not None and page_offset.w > 0
+    scale = (w / page_offset.w) if known else 1.0
+    dets = _detect(detector, arr, scale if known else None)
     offset = (page_offset.x, page_offset.y) if page_offset is not None else (0.0, 0.0)
     items = _extract(_Pixels([(0, arr)]), dets, ocr=ocr, site=site, today=today, scale=scale, offset=offset,
                      pad=pad, image_size=(w, h), allow_synthetic=True)
@@ -313,8 +529,10 @@ def extract_listings(image: "ImageInput", *, detector: DetectorLike, ocr: "OcrEn
     """Read every sold listing visible in one screenshot (a page tile, a full page or a single card).
 
     ``page_offset`` is where the image sits on the page in CSS pixels (as
-    returned by ``capture.capture_tiles``); it only affects the reported boxes
-    of ``extract_listings_detailed``. Results have ``extraction="vision"``,
+    returned by ``capture.capture_tiles``); it gives the reported boxes of
+    ``extract_listings_detailed`` page coordinates and tells the detector the
+    image's scale (otherwise measured from the image). ``site`` takes any form
+    ``urls.normalize_site`` accepts ("ebay.co.uk"). Results have ``extraction="vision"``,
     ``item_id=None`` and 1-based ``position`` in reading order.
     """
     return [e.listing for e in extract_listings_detailed(image, detector=detector, ocr=ocr, site=site,
@@ -325,20 +543,28 @@ def extract_page_detailed(tiles: Sequence[tuple[Path | str, Box]], *, detector: 
                           site: str = "www.ebay.com", today: date | None = None,
                           pad: int = 3) -> list[ExtractedListing]:
     """Like ``extract_page`` but returns boxes (page CSS px) and raw OCR text too."""
+    site = normalize_site(site)
     if not tiles:
         return []
     strips: list[tuple[int, np.ndarray]] = []
     dets: list[Detection] = []
     scale = None
+    page_bottom = max(b.y + b.h for _, b in tiles)
     for path, tile_box in tiles:
         arr = load_image(path)
         s = arr.shape[1] / tile_box.w if tile_box.w > 0 else 1.0
         scale = scale or s
         y_off = int(round(tile_box.y * scale))
         strips.append((y_off, arr))
-        for d in detector.detect(arr):
+        # Pieces of a card cut by this tile's top or bottom edge are re-joined with
+        # the neighbouring tile's pieces by merge_detections.
+        tol = max(2.0, 0.01 * arr.shape[0])
+        first, last = tile_box.y <= 0, tile_box.y + tile_box.h >= page_bottom
+        for d in _detect(detector, arr, scale):
             b = d.box
-            dets.append(Detection(cls=d.cls, conf=d.conf, box=Box(x=b.x, y=b.y + y_off, w=b.w, h=b.h)))
+            dets.append(Detection(cls=d.cls, conf=d.conf, box=Box(x=b.x, y=b.y + y_off, w=b.w, h=b.h),
+                                  cut_top=d.cut_top or (not first and b.y <= tol),
+                                  cut_bottom=d.cut_bottom or (not last and b.y + b.h >= arr.shape[0] - tol)))
     merged = merge_detections(dets) if len(tiles) > 1 else dets
     pixels = _Pixels(strips)
     items = _extract(pixels, merged, ocr=ocr, site=site, today=today, scale=scale or 1.0,

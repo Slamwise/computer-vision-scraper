@@ -7,7 +7,10 @@ Two engines behind one small protocol (``OcrEngine.read(bgr_array) -> OcrResult`
 * ``TesseractEngine``: the engine the original project used; needs the
   ``tesseract`` binary; ~140 ms per field, so crops are read in parallel
   processes (``read_many``). Slightly more exact on titles; the ``"auto"``
-  default when installed.
+  default when installed. Each call runs the binary directly with
+  ``OMP_THREAD_LIMIT=1`` in *its own* environment: one OpenMP thread is
+  fastest for a single text line, and setting the variable process-wide would
+  also cap torch's thread pool and slow YOLO down.
 
 Why the RapidOCR output used to lose its spaces ("SoldApr25,2026",
 "20122013HotWheelsZamac..."): ``RapidOCR()(crop)`` first runs its text
@@ -26,13 +29,16 @@ our measurements (a lower ratio splits wide capitals: "SKYLIN E").
 The remaining RapidOCR title errors come from its mostly-Chinese vocabulary:
 "&" is read as "8" ("Roebuck 8 Co."). Tesseract gets those right.
 
-All images are OpenCV-style BGR ``uint8`` arrays.
+Images are OpenCV-style BGR ``uint8`` arrays; grayscale, BGRA and float
+arrays are converted (``as_bgr``).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import subprocess
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
@@ -58,6 +64,33 @@ class OcrEngine(Protocol):
 
 
 # --- layout helpers (pure numpy) -------------------------------------------------
+
+
+def as_bgr(image: "np.ndarray") -> "np.ndarray":
+    """An OpenCV-style BGR ``uint8`` array from a BGR, BGRA or grayscale array.
+
+    Float arrays are taken as ``[0, 1]`` when their maximum is at most 1
+    (normalised images), else as ``[0, 255]``; 16-bit images are scaled down.
+    """
+    import numpy as np
+
+    arr = np.asarray(image)
+    if arr.dtype == np.uint16:
+        arr = (arr >> 8).astype(np.uint8)
+    elif arr.dtype != np.uint8:
+        arr = np.nan_to_num(arr.astype(np.float32))
+        if arr.size and float(arr.max()) <= 1.0:
+            arr = arr * 255.0
+        arr = np.clip(np.rint(arr), 0, 255).astype(np.uint8)
+    if arr.ndim == 2:
+        arr = arr[:, :, None]
+    if arr.ndim != 3 or arr.shape[2] not in (1, 3, 4):
+        raise ValueError(f"expected an HxW, HxWx3 or HxWx4 image, got shape {arr.shape}")
+    if arr.shape[2] == 1:
+        return np.repeat(arr, 3, axis=2)
+    if arr.shape[2] == 4:
+        return np.ascontiguousarray(arr[:, :, :3])
+    return arr
 
 
 def ink_mask(image: "np.ndarray", *, min_contrast: int = 60) -> "np.ndarray":
@@ -121,6 +154,30 @@ def word_gaps(mask: "np.ndarray", *, gap_ratio: float = 0.28) -> list[tuple[int,
     height = (rows[-1][1] - rows[0][0]) if rows else mask.shape[0]
     min_gap = max(2.0, gap_ratio * height)
     return [(a[1], b[0]) for a, b in zip(ink, ink[1:]) if b[0] - a[1] >= min_gap]
+
+
+def struck_through(image: "np.ndarray") -> bool:
+    """True when a line is drawn through the text (eBay strikes out the asking price of an accepted offer).
+
+    A few rows (the line is thin) in the middle half of the text line are one
+    unbroken run of ink across the whole text; ordinary glyphs always leave
+    gaps there (between characters, and above the decimal point), and a solid
+    block is not text.
+    """
+    mask = ink_mask(as_bgr(image))
+    lines = text_lines(mask)
+    if not lines:
+        return False
+    y0, y1 = max(lines, key=lambda line: line[1] - line[0])
+    cols = mask[y0:y1].any(axis=0).nonzero()[0]
+    if len(cols) < 2:
+        return False
+    width, h = cols[-1] - cols[0] + 1, y1 - y0
+    full = 0
+    for row in mask[y0 + h // 4:y0 + (3 * h + 3) // 4]:
+        runs = _runs(row)
+        full += bool(runs) and max(b - a for a, b in runs) >= 0.85 * width
+    return 1 <= full <= max(2, 0.2 * h)
 
 
 def _line_crops(image: "np.ndarray", *, margin_ratio: float = 0.25) -> list[tuple["np.ndarray", "np.ndarray"]]:
@@ -257,7 +314,7 @@ class RapidOcrEngine:
 
     def read(self, image: "np.ndarray") -> OcrResult:
         texts, confs = [], []
-        for line, mask in _line_crops(image):
+        for line, mask in _line_crops(as_bgr(image)):
             if line.shape[0] < self.min_line_height:
                 continue
             text, c = self._read_line(line, mask)
@@ -273,35 +330,56 @@ class RapidOcrEngine:
 
 
 def tesseract_available() -> bool:
-    if shutil.which("tesseract") is None:
-        return False
-    try:
-        import pytesseract  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    return shutil.which("tesseract") is not None
 
 
 class TesseractEngine:
-    """Tesseract (``pytesseract``) on upscaled grayscale lines (``--psm 7``)."""
+    """Tesseract on upscaled grayscale lines (``--psm 7``), run as one subprocess per line."""
 
     name = "tesseract"
 
-    def __init__(self, *, upscale: float = 3.0, lang: str = "eng", oem: int = 1, workers: int | None = None) -> None:
-        if not tesseract_available():
-            raise RuntimeError("tesseract is not installed (apt install tesseract-ocr, pip install pytesseract)")
-        import os
-
-        import pytesseract
-
-        # Tesseract's OpenMP threads make single-line calls 10-100x slower when
-        # the CPU is busy (e.g. next to YOLO); one thread per call is fastest here.
-        os.environ.setdefault("OMP_THREAD_LIMIT", "1")
-        self._tess = pytesseract
+    def __init__(self, *, upscale: float = 3.0, lang: str = "eng", oem: int = 1, workers: int | None = None,
+                 timeout_s: float = 30.0) -> None:
+        cmd = shutil.which("tesseract")
+        if cmd is None:
+            raise RuntimeError("tesseract is not installed (apt install tesseract-ocr / brew install tesseract)")
+        self.cmd = cmd
         self.workers = workers or os.cpu_count() or 1
         self.upscale = upscale
-        self.config = f"--oem {oem} --psm 7"
         self.lang = lang
+        self.oem = oem
+        self.timeout_s = timeout_s
+
+    def _env(self) -> dict[str, str]:
+        # Tesseract's OpenMP threads make single-line calls 10-100x slower when the
+        # CPU is busy (e.g. next to YOLO); one thread per call is fastest. Only the
+        # child gets the limit: in os.environ it would also throttle torch.
+        env = dict(os.environ)
+        env.setdefault("OMP_THREAD_LIMIT", "1")
+        return env
+
+    def _tesseract(self, gray: "np.ndarray") -> tuple[list[str], list[float]]:
+        """Words and their confidences (0..1) for one grayscale line image."""
+        import cv2
+
+        ok, png = cv2.imencode(".png", gray)
+        if not ok:
+            raise RuntimeError("could not encode the crop as PNG")
+        args = [self.cmd, "stdin", "stdout", "-l", self.lang, "--oem", str(self.oem), "--psm", "7", "tsv"]
+        proc = subprocess.run(args, input=png.tobytes(), capture_output=True, env=self._env(), timeout=self.timeout_s)
+        if proc.returncode != 0:
+            raise RuntimeError(f"tesseract failed ({proc.returncode}): {proc.stderr.decode(errors='replace')[:300]}")
+        words, confs = [], []
+        # TSV columns: level page block par line word left top width height conf text; level 5 = a word.
+        for row in proc.stdout.decode("utf-8", errors="replace").splitlines()[1:]:
+            cols = row.split("\t")
+            if len(cols) < 12 or cols[0] != "5":
+                continue
+            text = cols[11].strip()
+            if text:
+                words.append(text)
+                confs.append(max(0.0, float(cols[10])) / 100.0)
+        return words, confs
 
     def _read_line(self, line: "np.ndarray") -> tuple[str, list[float]]:
         import cv2
@@ -314,19 +392,12 @@ class TesseractEngine:
         if self.upscale != 1.0:
             gray = cv2.resize(gray, None, fx=self.upscale, fy=self.upscale, interpolation=cv2.INTER_CUBIC)
         gray = cv2.copyMakeBorder(gray, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=255)
-        data = self._tess.image_to_data(gray, lang=self.lang, config=self.config,
-                                        output_type=self._tess.Output.DICT)
-        words, confs = [], []
-        for text, conf in zip(data["text"], data["conf"]):
-            text = (text or "").strip()
-            if text:
-                words.append(text)
-                confs.append(max(0.0, float(conf)) / 100.0)
+        words, confs = self._tesseract(gray)
         return " ".join(words), confs
 
     def read(self, image: "np.ndarray") -> OcrResult:
         texts, confs = [], []
-        for line, _ in _line_crops(image):
+        for line, _ in _line_crops(as_bgr(image)):
             text, c = self._read_line(line)
             if text:
                 texts.append(text)
@@ -334,7 +405,6 @@ class TesseractEngine:
         if not texts:
             return OcrResult(text="", conf=0.0)
         return OcrResult(text=" ".join(texts), conf=round(sum(confs) / len(confs), 4))
-
 
     def read_many(self, images: "list[np.ndarray]") -> list[OcrResult]:
         """Read several crops in parallel (each Tesseract call is a separate process)."""
