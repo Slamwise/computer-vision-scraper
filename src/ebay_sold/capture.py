@@ -126,7 +126,12 @@ _REGIONS_JS = """
     if (title && /^shop on ebay$/i.test(title.innerText.trim())) continue;  // hidden template card
     put('title', [title]);
 
-    const prices = modern ? [...card.querySelectorAll('.s-card__price')] : [one(['.s-item__price'])];
+    // A struck-through price is the asking price of an accepted Best Offer, not
+    // what the item sold for; labelling it "price" would teach the wrong value.
+    const struck = (el) => el.closest('.strikethrough, .STRIKETHROUGH') !== null
+      || /line-through/.test(getComputedStyle(el).textDecorationLine);
+    const prices = (modern ? [...card.querySelectorAll('.s-card__price')] : [one(['.s-item__price'])])
+      .filter((el) => el && !struck(el));
     put('price', prices);
 
     put('sold_date', [modern
@@ -147,9 +152,14 @@ _REGIONS_JS = """
     }
     put('shipping', [shipping]);
 
-    put('condition', [modern
-      ? one(['.s-card__subtitle > .su-styled-text', '.s-card__subtitle'])
-      : one(['.s-item__subtitle .SECONDARY_INFO', '.SECONDARY_INFO'])]);
+    // Seller taglines share the subtitle markup; Python picks the condition line
+    // with the DOM parser's own rule so labels and parser always agree.
+    const subtitles = [];
+    for (const el of card.querySelectorAll(modern ? '.s-card__subtitle' : '.s-item__subtitle .SECONDARY_INFO, .SECONDARY_INFO')) {
+      const r = textRect([el]);
+      const t = text([el]);
+      if (r && t) subtitles.push({ text: t, box: r });
+    }
 
     const img = modern
       ? card.querySelector('img.s-card__image, .su-media-container img, .su-image img')
@@ -163,7 +173,7 @@ _REGIONS_JS = """
       const m = a && a.href.match(/\\/itm\\/(?:[^/?#]+\\/)?(\\d{9,15})/);
       itemId = m ? m[1] : null;
     }
-    out.push({ item_id: itemId, box: rectOf(card), fields, texts });
+    out.push({ item_id: itemId, box: rectOf(card), fields, texts, subtitles });
   }
   return out.filter((c) => c.box);
 }
@@ -247,8 +257,19 @@ async def stabilize_page(page: "Page", *, timeout_ms: int = 15000) -> dict[str, 
 
 async def card_regions(page: "Page") -> list[CardRegion]:
     """Locate every visible result card and its fields, in page coordinates."""
-    raw = await page.evaluate(_REGIONS_JS)
-    return [CardRegion.model_validate(r) for r in raw]
+    from .parse import _condition, _pick_condition
+
+    regions = []
+    for raw in await page.evaluate(_REGIONS_JS):
+        subtitles = raw.pop("subtitles", [])
+        label = _pick_condition([sub["text"] for sub in subtitles])
+        for sub in reversed(subtitles):  # the condition line is drawn last
+            if label and _condition(sub["text"]) == label:
+                raw["fields"]["condition"] = sub["box"]
+                raw["texts"]["condition"] = sub["text"]
+                break
+        regions.append(CardRegion.model_validate(raw))
+    return regions
 
 
 async def page_size(page: "Page") -> tuple[int, int]:
@@ -259,11 +280,13 @@ async def page_size(page: "Page") -> tuple[int, int]:
 
 
 async def capture_tiles(page: "Page", out_dir: str | Path, *, stem: str = "page",
-                        tile_height: int = 2000, overlap: int = 200) -> list[tuple[Path, Box]]:
+                        tile_height: int = 2000, overlap: int = 480) -> list[tuple[Path, Box]]:
     """Screenshot the whole page as overlapping horizontal tiles.
 
     Returns ``(png_path, tile_box)`` pairs; ``tile_box`` is the tile's area in
-    page coordinates, so detections can be mapped back onto the page.
+    page coordinates, so detections can be mapped back onto the page. The
+    overlap is larger than a result card (~320 px), so every card appears
+    whole in at least one tile.
     """
     if overlap >= tile_height:
         raise ValueError("overlap must be smaller than tile_height")

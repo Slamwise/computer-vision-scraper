@@ -36,3 +36,17 @@ async def test_regions_cover_every_visible_card(require_browser, tmp_path):
 
         shots = await capture_cards(page, tmp_path / "cards", regions=regions[:2])
         assert [p.exists() for _, p in shots] == [True, True]
+
+
+async def test_labels_follow_parser_rules_for_condition_and_struck_prices(require_browser):
+    from ebay_sold.parse import parse_search_page
+
+    html = load_fixture("sold_2025-11-02_xbox-one-controller")
+    parsed = {item.item_id: item for item in parse_search_page(html).listings}
+    async with render_html(html, load_images=False) as page:
+        regions = {r.item_id: r for r in await card_regions(page)}
+    # 127367489079 has a seller tagline above its "Open Box" condition line.
+    assert regions["127367489079"].texts["condition"] == parsed["127367489079"].condition == "Open Box"
+    # 376390868846 sold via an accepted Best Offer: only the struck asking price is shown.
+    assert parsed["376390868846"].price is None
+    assert "price" not in regions["376390868846"].fields

@@ -27,7 +27,7 @@ vision = [
     "rapidocr-onnxruntime>=1.2",
     "pytesseract>=0.3.10",
 ]
-llm = ["anthropic>=1.0"]
+llm = ["anthropic>=1.0", "pillow>=10.0"]  # Pillow slices tall screenshots
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 all = ["ebay-sold[vision,llm]"]
 

@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from .config import Settings
 from .db import Database
-from .models import Listing, PageResult, SearchQuery
+from .models import Box, Listing, PageResult, SearchQuery
 from .normalize import clean_text
 from .parse import parse_search_page
 from .urls import SITE_CURRENCY, normalize_site, search_url
@@ -80,7 +80,7 @@ async def scrape(
     matches). Stops everything on a challenge the user did not solve, or when
     the per-run page budget is used up.
     """
-    from .fetch import BlockedError, EbayFetcher, PageBudgetExceeded
+    from .fetch import BlockedError, EbayFetcher, FetchError, PageBudgetExceeded
 
     settings.ensure_dirs()
     reports: list[ScrapeReport] = []
@@ -95,19 +95,29 @@ async def scrape(
                 try:
                     fetched = await fetcher.fetch(url, use_cache=use_cache, screenshot_dir=shot_dir)
                 except BlockedError as exc:
-                    report.stopped_reason = f"blocked: {exc.info.reason}"
+                    report.stopped_reason = str(exc)
                     report.block_kind = exc.info.kind
-                    log.warning("stopping: %s (%s)", exc.info.kind, exc.info.reason)
+                    log.warning("stopping: %s", exc)
                     return reports
                 except PageBudgetExceeded:
                     report.stopped_reason = "page budget for this run used up"
                     return reports
+                except FetchError as exc:
+                    # This page failed after retries; the next search may still work.
+                    report.stopped_reason = f"fetch failed: {exc}"
+                    log.warning("%s: %s", url, exc)
+                    break
 
                 parsed = parse_search_page(fetched.html, site=query.site)
-                listings, how = await _extract(
-                    parsed.listings, fetched.html, settings=settings, site=query.site,
-                    vision=vision, llm=llm, tiles=[(Path(p), b) for p, b in fetched.tiles],
-                )
+                try:
+                    listings, how = await _extract(
+                        parsed.listings, fetched.html, settings=settings, site=query.site,
+                        vision=vision, llm=llm, tiles=[(Path(p), b) for p, b in fetched.tiles],
+                    )
+                except _ChallengeSeen as exc:
+                    report.stopped_reason = str(exc)
+                    report.block_kind = "captcha"
+                    return reports
                 result = PageResult(
                     url=url,
                     page=page_no,
@@ -131,7 +141,11 @@ async def scrape(
                 if on_page:
                     on_page(query, page_report)
                 if not listings:
-                    report.stopped_reason = "no listings on page"
+                    report.stopped_reason = (
+                        "no listings on page" if fetched.has_results
+                        else "eBay showed a page that is neither results nor a known challenge "
+                             f"(saved at {fetched.html_path or 'n/a'})"
+                    )
                     break
                 if page_report.exact_matches < len(listings):
                     report.stopped_reason = "reached 'results matching fewer words'"
@@ -140,6 +154,10 @@ async def scrape(
                     report.stopped_reason = "last page"
                     break
     return reports
+
+
+class _ChallengeSeen(RuntimeError):
+    """A screenshot turned out to show a CAPTCHA: stop like a detected block."""
 
 
 async def _extract(
@@ -157,49 +175,66 @@ async def _extract(
         return dom_listings, "dom"
     if vision == "off" and llm == "off":
         return dom_listings, "dom"
-
-    if not tiles:
-        tiles = await render_tiles(html, settings=settings)
-    if vision != "off":
-        found = vision_extract_tiles(tiles, settings=settings, site=site)
-        if found or llm == "off":
-            return (found or dom_listings), "vision"
-    found = llm_extract_tiles(tiles, settings=settings, site=site)
-    return (found or dom_listings), "llm"
-
-
-async def render_tiles(html: str, *, settings: Settings) -> list[tuple[Path, object]]:
-    """Screenshot saved HTML offline (no request to eBay) as page tiles."""
+    if tiles:
+        return _extract_from_tiles(dom_listings, tiles, settings=settings, site=site, vision=vision, llm=llm)
     import tempfile
 
+    with tempfile.TemporaryDirectory(prefix="ebay-sold-tiles-") as tmp:
+        tiles = await render_tiles(html, settings=settings, out_dir=Path(tmp))
+        return _extract_from_tiles(dom_listings, tiles, settings=settings, site=site, vision=vision, llm=llm)
+
+
+def _extract_from_tiles(dom_listings: list[Listing], tiles: list, *, settings: Settings, site: str,
+                        vision: FallbackMode, llm: FallbackMode) -> tuple[list[Listing], str]:
+    if vision != "off" and (llm != "always"):
+        found = vision_extract_tiles(tiles, settings=settings, site=site)
+        if found or llm == "off":
+            return (found or dom_listings), ("vision" if found else "dom")
+    if llm == "off":
+        return dom_listings, "dom"
+    found = llm_extract_tiles(tiles, settings=settings, site=site)
+    return (found or dom_listings), ("llm" if found else "dom")
+
+
+async def render_tiles(html: str, *, settings: Settings, out_dir: Path) -> list[tuple[Path, Box]]:
+    """Screenshot saved HTML offline (no request to eBay) as page tiles."""
     from .capture import capture_tiles, render_html
 
-    out = Path(tempfile.mkdtemp(prefix="ebay-sold-tiles-", dir=settings.screenshot_dir))
     async with render_html(html, settings=settings.browser.model_copy(update={"headless": True})) as page:
-        return await capture_tiles(page, out)
+        return await capture_tiles(page, out_dir)
 
 
 def vision_extract_tiles(tiles: list, *, settings: Settings, site: str) -> list[Listing]:
-    from .vision.detector import Detector
-    from .vision.extract import extract_page
-    from .vision.ocr import get_ocr
-
+    """YOLO + OCR over page tiles; ``[]`` (with a warning) when no model or it fails."""
     weights = settings.weights_path
     if not weights.exists():
         log.warning("vision fallback skipped: no model at %s (see docs/vision.md to train one)", weights)
         return []
-    detector = Detector(weights, imgsz=settings.vision.imgsz, conf=settings.vision.conf)
-    return extract_page(tiles, detector=detector, ocr=get_ocr(settings.vision.ocr_backend), site=site)
+    try:
+        from .vision.detector import Detector
+        from .vision.extract import extract_page
+        from .vision.ocr import get_ocr
+
+        detector = Detector(weights, imgsz=settings.vision.imgsz, conf=settings.vision.conf)
+        return extract_page(tiles, detector=detector, ocr=get_ocr(settings.vision.ocr_backend), site=site)
+    except ImportError as exc:
+        log.warning("vision fallback skipped: %s (pip install 'ebay-sold[vision]')", exc)
+    except Exception:  # a broken model or OCR install must not lose the page
+        log.exception("vision fallback failed")
+    return []
 
 
 def llm_extract_tiles(tiles: list, *, settings: Settings, site: str) -> list[Listing]:
-    from .llm import ClaudeExtractor
+    """Claude over page tiles; ``[]`` (with a warning) on failure. A CAPTCHA stops the run."""
+    from .llm import ClaudeExtractor, LLMExtractionError
 
-    extractor = ClaudeExtractor(settings.llm)
-    found: list[Listing] = []
-    for path, _box in tiles:
-        found.extend(extractor.extract(Path(path), site=site))
-    return found
+    try:
+        return ClaudeExtractor(settings.llm).extract_tiles([(Path(p), b) for p, b in tiles], site=site)
+    except LLMExtractionError as exc:
+        if exc.reason == "captcha":
+            raise _ChallengeSeen(f"the page screenshot shows a challenge: {exc}") from exc
+        log.warning("Claude fallback failed (%s): %s", exc.reason, exc)
+        return []
 
 
 # --- saved pages and screenshots -----------------------------------------------

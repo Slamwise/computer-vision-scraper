@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<!-- Synthetic test fixture: eBay's Akamai edge block, served with HTTP 403 to
+     flagged (e.g. datacenter) IPs before any eBay page is rendered. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Error Page | eBay</title>
+<style>
+  body { font-family: "Market Sans", Arial, sans-serif; margin: 0; color: #191919; }
+  header { padding: 16px 24px; border-bottom: 1px solid #e5e5e5; }
+  main { max-width: 640px; margin: 64px auto; padding: 0 24px; }
+  h1 { font-size: 24px; font-weight: 700; }
+  .ref { color: #707070; font-size: 12px; margin-top: 40px; }
+</style>
+</head>
+<body>
+<header><a href="https://www.ebay.com/" aria-label="eBay Home"><svg width="80" height="32" role="img" aria-label="eBay"><text x="0" y="24" font-size="28" font-weight="700">ebay</text></svg></a></header>
+<main>
+  <h1>We're sorry, the page you're looking for is not available right now.</h1>
+  <p>Please try again later, or go to the <a href="https://www.ebay.com/">eBay home page</a>.</p>
+  <p class="ref">Reference ID: 18.7c3e1602.1760000000.2a4b6c8d</p>
+</main>
+</body>
+</html>

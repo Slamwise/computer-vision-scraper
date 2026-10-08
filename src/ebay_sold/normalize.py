@@ -110,6 +110,11 @@ _FREE_RE = re.compile(
 )
 
 
+# A shipping line only states a cost if it shows a currency or a cents amount;
+# "Delivery in 2-4 days" has digits but no price.
+_MONEY_HINT_RE = re.compile(r"[$£€]|\b(?:USD|CAD|AUD|GBP|EUR)\b|\d[.,]\d{2}(?!\d)", re.IGNORECASE)
+
+
 def parse_shipping(text: str | None, default_currency: str | None = None) -> float | None:
     """``0.0`` for free shipping, the amount for "+$9.45 delivery", else ``None``."""
     text = clean_text(text)
@@ -117,6 +122,8 @@ def parse_shipping(text: str | None, default_currency: str | None = None) -> flo
         return None
     if _FREE_RE.search(text):
         return 0.0
+    if not _MONEY_HINT_RE.search(_ocr_fix_money(text)):
+        return None
     money = parse_money(text, default_currency)
     return money.amount if money else None
 
@@ -195,20 +202,21 @@ def parse_sold_date(text: str | None, today: date | None = None, *, day_first: b
 
 # --- counts, sellers, formats -----------------------------------------------
 
-_COUNT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*([KkMm])?")
+_COUNT_RE = re.compile(r"(\d{1,3}(?:[.,\u00a0 ]\d{3})+(?!\d)|\d+(?:[.,]\d+)?)\s*([KkMm](?![a-z]))?")
 
 
 def parse_count(text: str | None) -> int | None:
-    """"267" -> 267, "2.1K" -> 2100, "1,234" -> 1234, "3 bids" -> 3."""
+    """"267" -> 267, "2.1K" -> 2100, "1,234,567" -> 1234567, "3 bids" -> 3."""
     text = clean_text(text)
     m = _COUNT_RE.search(text)
     if not m:
         return None
     num, suffix = m.group(1), (m.group(2) or "").upper()
     if suffix:
-        value = float(num.replace(",", "."))
+        value = float(num.replace(",", ".")) if re.fullmatch(r"\d+(?:[.,]\d{1,2})?", num) else float(re.sub(r"\D", "", num))
         return int(round(value * (1000 if suffix == "K" else 1_000_000)))
-    return int(re.sub(r"[.,]", "", num))
+    digits = re.sub(r"\D", "", num)
+    return int(digits) if len(digits) <= 15 else None
 
 
 _FEEDBACK_RE = re.compile(
@@ -217,10 +225,19 @@ _FEEDBACK_RE = re.compile(
 )
 
 
+# Legacy layout: "seller_name (1,234) 99.8%".
+_FEEDBACK_LEGACY_RE = re.compile(
+    r"^(?P<seller>\S.*?)\s*\((?P<count>[\d.,]+\s*[KkMm]?)\)\s*(?P<pct>\d{1,3}(?:[.,]\d)?)\s*%",
+)
+
+
 def parse_feedback(text: str | None) -> tuple[str | None, float | None, int | None]:
-    """"mystuffnnowyours 100% positive (267)" -> ("mystuffnnowyours", 100.0, 267)."""
+    """"mystuffnnowyours 100% positive (267)" -> ("mystuffnnowyours", 100.0, 267).
+
+    Also reads the legacy order, "mystuffnnowyours (267) 100%".
+    """
     text = clean_text(text)
-    m = _FEEDBACK_RE.search(text)
+    m = _FEEDBACK_RE.search(text) or _FEEDBACK_LEGACY_RE.search(text)
     if not m:
         return (text.split(" ")[0] if text else None), None, None
     seller = m.group("seller").strip() or None
@@ -254,7 +271,7 @@ def classify_format(texts: list[str]) -> tuple[str, int | None]:
     return fmt, bids
 
 
-_LOCATION_RE = re.compile(r"^(?:located in|from|aus|de|da|desde)\s+", re.IGNORECASE)
+_LOCATION_RE = re.compile(r"^(?:(?:located in|from|aus|de|da|desde)\s+|provenance\s*:?\s*)", re.IGNORECASE)
 
 
 def parse_location(text: str | None) -> str | None:

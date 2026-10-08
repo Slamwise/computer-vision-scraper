@@ -65,6 +65,9 @@ def test_parse_money_not_a_range_when_digits_follow_later():
         ("+£3.20 postage", 3.20),
         ("+$9.45delivery", 9.45),
         ("Shipping not specified", None),
+        ("Delivery in 2-4 days", None),  # digits, but no price
+        ("+S9.45 delivery", 9.45),  # OCR read "$" as "S"
+        ("EUR 4,50 Versand", 4.5),
         ("Freight", None),
         ("", None),
     ],
@@ -101,7 +104,8 @@ def test_parse_sold_date_numeric_respects_day_first():
 
 @pytest.mark.parametrize(
     "text, expected",
-    [("267", 267), ("2.1K", 2100), ("12K", 12000), ("1,234", 1234), ("3 bids", 3), ("1.2M", 1_200_000), ("", None)],
+    [("267", 267), ("2.1K", 2100), ("12K", 12000), ("1,234", 1234), ("1,234,567", 1_234_567), ("1 234 567", 1_234_567),
+     ("6,200+ results", 6200), ("3 bids", 3), ("1.2M", 1_200_000), ("", None), ("9" * 40, None)],
 )
 def test_parse_count(text, expected):
     assert parse_count(text) == expected
@@ -113,6 +117,7 @@ def test_parse_count(text, expected):
         ("mystuffnnowyours 100% positive (267)", ("mystuffnnowyours", 100.0, 267)),
         ("goldstar_tech 99.8% positive (12K) Top Rated", ("goldstar_tech", 99.8, 12000)),
         ("hildrzac 100% positive (2.1K)", ("hildrzac", 100.0, 2100)),
+        ("oldstyle_seller (1,234) 99.8%", ("oldstyle_seller", 99.8, 1234)),  # legacy layout order
     ],
 )
 def test_parse_feedback(text, expected):
@@ -140,4 +145,5 @@ def test_clean_text_strips_invisible_separators():
 def test_parse_location():
     assert parse_location("Located in United States") == "United States"
     assert parse_location("from Canada") == "Canada"
+    assert parse_location("Provenance : Chine") == "Chine"
     assert parse_location("") is None
