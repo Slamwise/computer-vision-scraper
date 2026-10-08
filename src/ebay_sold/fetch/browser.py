@@ -133,6 +133,15 @@ _PERMANENT_NET_ERRORS = (
 )
 
 
+_KIND_PHRASE = {
+    "captcha": "a CAPTCHA",
+    "interstitial": "a browser check",
+    "access_denied": "an access-denied page",
+    "rate_limited": "a too-many-requests page",
+    "signin": "a sign-in page",
+}
+
+
 class BlockedError(RuntimeError):
     """eBay answered with a challenge or block that was not (or cannot be) solved. Stop the run."""
 
@@ -141,7 +150,7 @@ class BlockedError(RuntimeError):
         self.info = info
         self.challenges_seen = challenges_seen
         self.retry_after_s = retry_after_s  # suggested pause before the next run
-        msg = f"eBay served a {info.kind} page ({info.reason}) at {info.url}"
+        msg = f"eBay served {_KIND_PHRASE.get(info.kind, 'a ' + info.kind + ' page')} ({info.reason}) at {info.url}"
         if detail:
             msg += f": {detail}"
         msg += ". Stopped instead of retrying"

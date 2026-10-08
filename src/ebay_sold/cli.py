@@ -238,11 +238,22 @@ def cmd_scrape(args: argparse.Namespace) -> int:
         print(f"{r.keywords}: {r.listings} listings ({r.new} new){total}; {r.stopped_reason}")
         if r.block_kind:
             status = 3
-            print("  eBay asked for verification. Wait a while before the next run; "
-                  "see docs/anti-bot.md. `ebay-sold browser` opens the same profile so you can check by hand.")
+            print("  " + _BLOCK_ADVICE.get(r.block_kind, _BLOCK_ADVICE["captcha"]))
     if len(reports) < len(queries):
         print(f"{len(queries) - len(reports)} searches not started.")
     return status
+
+
+_BLOCK_ADVICE = {
+    "access_denied": "eBay refused the connection itself. That is your IP address, not the browser: cloud servers, "
+                     "VPNs and proxy lists are blocked outright. Run from your home connection (docs/anti-bot.md).",
+    "rate_limited": "eBay says too many requests. Leave it for a few hours and keep the default pacing.",
+    "signin": "eBay sent the browser to its sign-in page. Run `ebay-sold browser` to look; don't sign in "
+              "to your eBay account in the scraper's profile (docs/anti-bot.md).",
+    "captcha": "eBay asked for verification. Wait a while before the next run, or run without --headless to "
+               "solve it in the window. `ebay-sold browser` opens the same profile so you can check by hand.",
+    "interstitial": "eBay's browser check did not clear. Wait a while, and run without --headless next time.",
+}
 
 
 def cmd_import_html(args: argparse.Namespace) -> int:
