@@ -42,6 +42,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except ModuleNotFoundError as exc:
+        extra = "llm" if (exc.name or "").startswith("anthropic") else "vision"
+        print(f"missing dependency {exc.name!r}: pip install 'ebay-sold[{extra}]'", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        from .llm import LLMExtractionError
+
+        if isinstance(exc, (LLMExtractionError, FileNotFoundError, ValueError)) and not args.verbose:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        raise
 
 
 def build_parser() -> argparse.ArgumentParser:
